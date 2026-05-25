@@ -76,7 +76,7 @@ spinner.waiting: "Waiting... %{seconds}s"
 spinner.cancel_hint: "(Ctrl+C to cancel)"
 
 # Diff stats
-diff.truncated: "Diff too large, some files shown as summary only to fit LLM token limit"
+diff.truncated: "Some files are shown as summary only before sending to the LLM"
 diff.files_changed: "%{count} file changed"
 diff.files_changed_plural: "%{count} files changed"
 diff.insertions: "%{count} insertion(+)"

@@ -78,6 +78,7 @@ fn test_app_config_default_review() {
 fn test_app_config_default_file() {
     let config = AppConfig::default();
     assert_eq!(config.file.max_size, 10 * 1024 * 1024);
+    assert!(config.file.lockfile_patterns.is_empty());
 }
 
 // === Configuration loading test ===
@@ -457,12 +458,32 @@ fn test_serde_empty_config_matches_default() {
 
     // File
     assert_eq!(deserialized.file.max_size, default_config.file.max_size);
+    assert_eq!(
+        deserialized.file.lockfile_patterns,
+        default_config.file.lockfile_patterns
+    );
 
     // Commit convention
     assert_eq!(
         deserialized.commit.convention,
         default_config.commit.convention
     );
+}
+
+#[test]
+fn test_file_lockfile_patterns_deserialize() {
+    let raw = r#"
+[file]
+lockfile_patterns = ["**/*.lock", "locks/*.txt"]
+"#;
+
+    let config: AppConfig = toml::from_str(raw).unwrap();
+
+    assert_eq!(
+        config.file.lockfile_patterns,
+        vec!["**/*.lock".to_string(), "locks/*.txt".to_string()]
+    );
+    assert_eq!(config.file.max_size, 10 * 1024 * 1024);
 }
 
 // === CommitConvention Test ===

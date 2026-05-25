@@ -192,16 +192,19 @@ impl Default for UIConfig {
 
 /// File configuration.
 ///
-/// Controls local file-read limits.
+/// Controls local file-read limits and diff file summarization rules.
 ///
 /// # Fields
 /// - `max_size`: max file size in bytes (default: 10 MiB)
 ///   Used by `review file <PATH>` when reading workspace files.
+/// - `lockfile_patterns`: extra glob patterns for dependency lockfiles whose
+///   full diff should never be sent to the LLM.
 ///
 /// # Example
 /// ```toml
 /// [file]
 /// max_size = 10485760  # 10MB
+/// lockfile_patterns = ["**/*.lock"]
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FileConfig {
@@ -210,12 +213,20 @@ pub struct FileConfig {
     /// Current read limit for `review file <PATH>`.
     #[serde(default = "default_max_file_size")]
     pub max_size: u64,
+
+    /// Additional lockfile glob patterns.
+    ///
+    /// Built-in common dependency lockfiles are always summarized. These
+    /// patterns are appended to the built-ins and use git-style relative paths.
+    #[serde(default)]
+    pub lockfile_patterns: Vec<String>,
 }
 
 impl Default for FileConfig {
     fn default() -> Self {
         Self {
             max_size: default_max_file_size(),
+            lockfile_patterns: Vec::new(),
         }
     }
 }

@@ -114,7 +114,11 @@ async fn run_with_deps(
     let stats = repo.get_diff_stats(&diff)?;
 
     // Truncate overly large diffs to prevent tokens from exceeding the limit
-    let (diff, truncated) = smart_truncate_diff(&diff, config.llm.max_diff_size);
+    let (diff, truncated) = smart_truncate_diff(
+        &diff,
+        config.llm.max_diff_size,
+        &config.file.lockfile_patterns,
+    );
     if truncated {
         ui::warning(&rust_i18n::t!("diff.truncated"), colored);
     }
@@ -243,7 +247,11 @@ async fn handle_json_mode(
     }
     let diff = get_diff(repo, options.amend)?;
     let stats = repo.get_diff_stats(&diff)?;
-    let (diff, _truncated) = smart_truncate_diff(&diff, config.llm.max_diff_size);
+    let (diff, _truncated) = smart_truncate_diff(
+        &diff,
+        config.llm.max_diff_size,
+        &config.file.lockfile_patterns,
+    );
     let branch_name = repo.get_current_branch()?;
     let custom_prompt = config.commit.custom_prompt.clone();
     let scope_info = compute_scope_info(&stats.files_changed, config);

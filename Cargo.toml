@@ -1,6 +1,6 @@
 [package]
 name = "gcop-rs"
-version = "0.14.0"
+version = "0.14.1"
 edition = "2024"
 rust-version = "1.88.0"
 license = "MIT"
@@ -52,6 +52,7 @@ inquire = "0.9"
 directories = "6.0"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 git2 = {version = "0.21", default-features = false }
+globset = "0.4"
 httpdate = "1.0"
 indicatif = "0.18.4"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "socks", "stream", "system-proxy"] }

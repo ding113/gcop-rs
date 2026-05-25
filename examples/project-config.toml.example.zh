@@ -30,6 +30,12 @@
 # custom_prompt = ""
 # min_severity = "warning"
 
+# --- 文件配置 ---
+# [file]
+# 额外 lockfile glob pattern；匹配文件的完整 diff 永远不会发送给 LLM。
+# 常见依赖 lockfile 已内置，会只保留摘要。
+# lockfile_patterns = ["**/*.lock"]
+
 # --- Workspace (monorepo) ---
 # [workspace]
 # enabled = true

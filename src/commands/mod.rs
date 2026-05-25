@@ -56,24 +56,45 @@ pub use format::OutputFormat;
 pub use options::{CommitOptions, ReviewOptions, StatsOptions};
 
 use crate::git::diff::{FileDiff, split_diff_by_file};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use std::fmt::Write;
 
 /// Filename suffixes that are typically auto-generated artifacts.
-const AUTO_GENERATED_SUFFIXES: &[&str] = &[".lock", ".min.js", ".min.css"];
+const AUTO_GENERATED_SUFFIXES: &[&str] = &[".min.js", ".min.css"];
 
-/// Exact auto-generated basenames.
-const AUTO_GENERATED_BASENAMES: &[&str] = &["package-lock.json", "pnpm-lock.yaml", "go.sum"];
+/// Exact lockfile basenames (case-insensitive).
+///
+/// This list is intentionally stricter than generated-artifact detection:
+/// only real dependency lockfiles are forced to summary-only output.
+const LOCKFILE_BASENAMES: &[&str] = &[
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "cargo.lock",
+    "poetry.lock",
+    "pipfile.lock",
+    "uv.lock",
+    "composer.lock",
+    "gemfile.lock",
+    "go.sum",
+    "go.work.sum",
+    "bun.lockb",
+    "bun.lock",
+    "deno.lock",
+    "flake.lock",
+    "conan.lock",
+    "pubspec.lock",
+    "mix.lock",
+    "stack.yaml.lock",
+    "podfile.lock",
+];
 
 /// Substrings that usually indicate generated files.
 const AUTO_GENERATED_SUBSTRINGS: &[&str] = &[".generated."];
 
 /// Returns `true` if `filename` matches an auto-generated file pattern.
 fn is_auto_generated(filename: &str) -> bool {
-    let basename = filename.rsplit('/').next().unwrap_or(filename);
-
-    if AUTO_GENERATED_BASENAMES.contains(&basename) {
-        return true;
-    }
     if AUTO_GENERATED_SUFFIXES
         .iter()
         .any(|&s| filename.ends_with(s))
@@ -89,21 +110,91 @@ fn is_auto_generated(filename: &str) -> bool {
     false
 }
 
+/// Returns `true` if `filename` is a dependency lockfile.
+///
+/// Built-in basenames are case-insensitive. User-provided glob patterns are
+/// also case-insensitive and match repository-relative paths like
+/// `apps/web/Cargo.lock`.
+#[cfg(test)]
+fn is_lockfile(filename: &str, patterns: &[String]) -> bool {
+    LockfileMatcher::new(patterns).is_match(filename)
+}
+
+struct LockfileMatcher {
+    custom_patterns: Option<GlobSet>,
+}
+
+impl LockfileMatcher {
+    fn new(patterns: &[String]) -> Self {
+        Self {
+            custom_patterns: build_lockfile_globset(patterns),
+        }
+    }
+
+    fn is_match(&self, filename: &str) -> bool {
+        let normalized = filename.replace('\\', "/");
+        let basename = normalized.rsplit('/').next().unwrap_or(&normalized);
+
+        if LOCKFILE_BASENAMES
+            .iter()
+            .any(|name| basename.eq_ignore_ascii_case(name))
+        {
+            return true;
+        }
+
+        self.custom_patterns
+            .as_ref()
+            .is_some_and(|globset| globset.is_match(normalized))
+    }
+}
+
+fn build_lockfile_globset(patterns: &[String]) -> Option<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    let mut has_patterns = false;
+
+    for pattern in patterns.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+        match GlobBuilder::new(pattern)
+            .case_insensitive(true)
+            .literal_separator(true)
+            .build()
+        {
+            Ok(glob) => {
+                builder.add(glob);
+                has_patterns = true;
+            }
+            Err(err) => {
+                tracing::warn!("Ignoring invalid lockfile pattern '{}': {}", pattern, err);
+            }
+        }
+    }
+
+    if has_patterns {
+        match builder.build() {
+            Ok(globset) => Some(globset),
+            Err(err) => {
+                tracing::warn!("Ignoring lockfile patterns: {}", err);
+                None
+            }
+        }
+    } else {
+        None
+    }
+}
+
 /// Truncates diffs at file granularity to reduce LLM token usage.
 ///
 /// Replaces previous byte-level truncation. Every file keeps at least summary stats.
-/// Important files keep full patches, while generated or over-budget files are downgraded to summary-only entries.
+/// Important files keep full patches, while lockfiles, generated files, or over-budget files are downgraded to summary-only entries.
 ///
 /// Returns `(formatted_diff, had_downgraded_files)`.
-pub(crate) fn smart_truncate_diff(diff: &str, max_size: usize) -> (String, bool) {
+pub(crate) fn smart_truncate_diff(
+    diff: &str,
+    max_size: usize,
+    lockfile_patterns: &[String],
+) -> (String, bool) {
     let files = split_diff_by_file(diff);
 
     if files.is_empty() {
-        return (diff.to_string(), false);
-    }
-
-    // Fast path: total diff size is within budget.
-    if diff.len() <= max_size {
         return (diff.to_string(), false);
     }
 
@@ -111,14 +202,24 @@ pub(crate) fn smart_truncate_diff(diff: &str, max_size: usize) -> (String, bool)
     let mut full_files: Vec<&FileDiff> = Vec::new();
     let mut summary_files: Vec<(&FileDiff, &str)> = Vec::new(); // (file, reason)
 
-    // Auto-generated files are always downgraded to summary-only mode.
+    // Lockfiles are always downgraded to summary-only mode.
+    // Auto-generated non-lockfiles are downgraded only when the total diff is over budget.
+    let lockfile_matcher = LockfileMatcher::new(lockfile_patterns);
     let mut normal_files: Vec<&FileDiff> = Vec::new();
+    let over_budget = diff.len() > max_size;
     for file in &files {
-        if is_auto_generated(&file.filename) {
+        if lockfile_matcher.is_match(&file.filename) {
+            summary_files.push((file, "lockfile"));
+        } else if over_budget && is_auto_generated(&file.filename) {
             summary_files.push((file, "auto-generated"));
         } else {
             normal_files.push(file);
         }
+    }
+
+    // Fast path: total diff size is within budget and no always-summary files exist.
+    if !over_budget && summary_files.is_empty() {
+        return (diff.to_string(), false);
     }
 
     // Sort normal files by ascending patch size (small files are kept first).
@@ -174,18 +275,61 @@ pub(crate) fn smart_truncate_diff(diff: &str, max_size: usize) -> (String, bool)
     (output, was_truncated)
 }
 
+/// Replace lockfile patches with summary-only pseudo-diffs.
+///
+/// Split mode still needs one entry per staged file so the model can group all
+/// files correctly. This keeps file names and change counts while omitting the
+/// full lockfile patch content.
+pub(crate) fn summarize_lockfile_diffs(
+    file_diffs: &[FileDiff],
+    lockfile_patterns: &[String],
+) -> (Vec<FileDiff>, bool) {
+    let lockfile_matcher = LockfileMatcher::new(lockfile_patterns);
+    let mut changed = false;
+    let summarized = file_diffs
+        .iter()
+        .map(|file| {
+            if lockfile_matcher.is_match(&file.filename) {
+                changed = true;
+                let mut file = file.clone();
+                file.content = format!(
+                    "diff --git a/{0} b/{0}\n# Lockfile diff omitted; summary only: +{1} -{2} lines",
+                    file.filename, file.insertions, file.deletions
+                );
+                file
+            } else {
+                file.clone()
+            }
+        })
+        .collect();
+
+    (summarized, changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_is_auto_generated_lock_files() {
-        assert!(is_auto_generated("Cargo.lock"));
-        assert!(is_auto_generated("yarn.lock"));
-        assert!(is_auto_generated("poetry.lock"));
-        assert!(is_auto_generated("package-lock.json"));
-        assert!(is_auto_generated("pnpm-lock.yaml"));
-        assert!(is_auto_generated("go.sum"));
+    fn test_is_lockfile_builtin_basenames() {
+        assert!(is_lockfile("Cargo.lock", &[]));
+        assert!(is_lockfile("apps/web/yarn.lock", &[]));
+        assert!(is_lockfile("POETRY.LOCK", &[]));
+        assert!(is_lockfile("package-lock.json", &[]));
+        assert!(is_lockfile("pnpm-lock.yaml", &[]));
+        assert!(is_lockfile("go.sum", &[]));
+        assert!(is_lockfile("go.work.sum", &[]));
+        assert!(is_lockfile("bun.lockb", &[]));
+        assert!(is_lockfile("Podfile.lock", &[]));
+    }
+
+    #[test]
+    fn test_is_lockfile_custom_patterns() {
+        let patterns = vec!["**/*.lock".to_string(), "locks/*.txt".to_string()];
+        assert!(is_lockfile("deps.lock", &patterns));
+        assert!(is_lockfile("apps/web/deps.lock", &patterns));
+        assert!(is_lockfile("locks/deps.txt", &patterns));
+        assert!(!is_lockfile("src/locksmith.rs", &patterns));
     }
 
     #[test]
@@ -201,6 +345,7 @@ mod tests {
         assert!(!is_auto_generated("src/main.rs"));
         assert!(!is_auto_generated("README.md"));
         assert!(!is_auto_generated("Cargo.toml"));
+        assert!(!is_auto_generated("Cargo.lock"));
         assert!(!is_auto_generated("src/locksmith.rs")); // Contains "lock" but does not end with .lock
     }
 
@@ -211,29 +356,59 @@ mod tests {
                      +++ b/src/main.rs\n\
                      +hello";
         // budget is big enough
-        let (result, truncated) = smart_truncate_diff(diff, 10000);
+        let (result, truncated) = smart_truncate_diff(diff, 10000, &[]);
         assert!(!truncated);
         assert_eq!(result, diff);
     }
 
     #[test]
-    fn test_smart_truncate_auto_generated_demoted() {
+    fn test_smart_truncate_lockfile_demoted_even_under_budget() {
+        let diff = "diff --git a/Cargo.lock b/Cargo.lock\n\
+                     --- a/Cargo.lock\n\
+                     +++ b/Cargo.lock\n\
+                     +lots of lock content";
+
+        let (result, truncated) = smart_truncate_diff(diff, 10000, &[]);
+
+        assert!(truncated);
+        assert!(result.contains("## Summary only (1 files)"));
+        assert!(result.contains("Cargo.lock (+1 -0) [lockfile]"));
+        assert!(!result.contains("+lots of lock content"));
+    }
+
+    #[test]
+    fn test_smart_truncate_custom_lockfile_pattern_demoted() {
+        let diff = "diff --git a/apps/web/deps.snapshot b/apps/web/deps.snapshot\n\
+                     --- a/apps/web/deps.snapshot\n\
+                     +++ b/apps/web/deps.snapshot\n\
+                     +custom lock content";
+        let patterns = vec!["**/*.snapshot".to_string()];
+
+        let (result, truncated) = smart_truncate_diff(diff, 10000, &patterns);
+
+        assert!(truncated);
+        assert!(result.contains("apps/web/deps.snapshot (+1 -0) [lockfile]"));
+        assert!(!result.contains("+custom lock content"));
+    }
+
+    #[test]
+    fn test_smart_truncate_auto_generated_demoted_when_over_budget() {
         let diff = "diff --git a/src/main.rs b/src/main.rs\n\
                      --- a/src/main.rs\n\
                      +++ b/src/main.rs\n\
                      +hello\n\
-                     diff --git a/Cargo.lock b/Cargo.lock\n\
-                     --- a/Cargo.lock\n\
-                     +++ b/Cargo.lock\n\
-                     +lots of lock content";
+                     diff --git a/bundle.min.js b/bundle.min.js\n\
+                     --- a/bundle.min.js\n\
+                     +++ b/bundle.min.js\n\
+                     +lots of generated content";
         // The budget is enough to fit everything, but smart truncation is triggered because the total size > max_size
         // Set a budget that’s just enough
-        let (result, truncated) = smart_truncate_diff(diff, diff.len() - 1);
+        let (result, truncated) = smart_truncate_diff(diff, diff.len() - 1, &[]);
         assert!(truncated);
         assert!(result.contains("## Full diff"));
         assert!(result.contains("src/main.rs"));
         assert!(result.contains("## Summary only"));
-        assert!(result.contains("Cargo.lock"));
+        assert!(result.contains("bundle.min.js"));
         assert!(result.contains("[auto-generated]"));
     }
 
@@ -249,7 +424,7 @@ mod tests {
         let diff = format!("{}\n{}", small_diff, big_diff);
 
         // The budget is only enough for small files
-        let (result, truncated) = smart_truncate_diff(&diff, small_diff.len() + 100);
+        let (result, truncated) = smart_truncate_diff(&diff, small_diff.len() + 100, &[]);
         assert!(truncated);
         assert!(result.contains("## Full diff"));
         assert!(result.contains("small.rs"));
@@ -271,7 +446,7 @@ mod tests {
         let diff = format!("{}\n{}", big1, big2);
 
         // The budget is extremely small and there is no room for both files.
-        let (result, truncated) = smart_truncate_diff(&diff, 10);
+        let (result, truncated) = smart_truncate_diff(&diff, 10, &[]);
         assert!(truncated);
         assert!(result.contains("## Summary only (2 files)"));
         assert!(result.contains("a.rs"));
@@ -280,7 +455,7 @@ mod tests {
 
     #[test]
     fn test_smart_truncate_empty_diff() {
-        let (result, truncated) = smart_truncate_diff("", 1000);
+        let (result, truncated) = smart_truncate_diff("", 1000, &[]);
         assert!(!truncated);
         assert_eq!(result, "");
     }
@@ -292,7 +467,7 @@ mod tests {
         let file_b = "diff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n+line3";
         let diff = format!("{}\n{}", file_a, file_b);
         // The budget is only enough for file_b (the smaller one), not enough for two
-        let (result, truncated) = smart_truncate_diff(&diff, file_a.len());
+        let (result, truncated) = smart_truncate_diff(&diff, file_a.len(), &[]);
         assert!(truncated);
         // The file content in full diff should be complete (not cut in half)
         if result.contains("+line1") {
@@ -302,5 +477,30 @@ mod tests {
         // b.rs is smaller and should be in full diff
         assert!(result.contains("## Full diff"));
         assert!(result.contains("## Summary only"));
+    }
+
+    #[test]
+    fn test_summarize_lockfile_diffs_for_split() {
+        let files = vec![
+            FileDiff {
+                filename: "src/main.rs".to_string(),
+                content: "+code".to_string(),
+                insertions: 1,
+                deletions: 0,
+            },
+            FileDiff {
+                filename: "Cargo.lock".to_string(),
+                content: "+lots of lock content".to_string(),
+                insertions: 42,
+                deletions: 7,
+            },
+        ];
+
+        let (result, changed) = summarize_lockfile_diffs(&files, &[]);
+
+        assert!(changed);
+        assert_eq!(result[0].content, "+code");
+        assert!(result[1].content.contains("summary only: +42 -7 lines"));
+        assert!(!result[1].content.contains("+lots of lock content"));
     }
 }

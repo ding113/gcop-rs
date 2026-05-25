@@ -44,6 +44,13 @@ show_diff_preview = true
 allow_edit = true
 # split = true  # 始终使用原子拆分提交模式
 
+# --- 文件配置 ---
+[file]
+# 额外 lockfile glob pattern；匹配文件的完整 diff 永远不会发送给 LLM。
+# 常见依赖 lockfile 已内置，例如 Cargo.lock、yarn.lock、pnpm-lock.yaml、
+# package-lock.json、poetry.lock、go.sum、bun.lock、deno.lock。
+# lockfile_patterns = ["**/*.lock"]
+
 # --- UI 配置 ---
 [ui]
 colored = true

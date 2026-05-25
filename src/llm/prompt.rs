@@ -413,6 +413,26 @@ mod tests {
         assert!(system.contains("Use Japanese"));
     }
 
+    #[test]
+    fn test_split_commit_prompt_uses_lockfile_summary() {
+        let ctx = create_context(vec!["Cargo.lock"], 42, 7, None, vec![]);
+        let diffs = vec![crate::git::diff::FileDiff {
+            filename: "Cargo.lock".to_string(),
+            content: "diff --git a/Cargo.lock b/Cargo.lock\n+lots of lock content".to_string(),
+            insertions: 42,
+            deletions: 7,
+        }];
+        let (diffs, changed) = crate::commands::summarize_lockfile_diffs(&diffs, &[]);
+
+        assert!(changed);
+        let (_, user) = build_split_commit_prompt(&diffs, &ctx, None, None);
+
+        assert!(user.contains("- Cargo.lock"));
+        assert!(user.contains("### File: Cargo.lock (+42 -7)"));
+        assert!(user.contains("Lockfile diff omitted; summary only: +42 -7 lines"));
+        assert!(!user.contains("+lots of lock content"));
+    }
+
     // === build_review_prompt_split test ===
 
     #[test]

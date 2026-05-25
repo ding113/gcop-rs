@@ -30,6 +30,12 @@
 # custom_prompt = ""
 # min_severity = "warning"
 
+# --- File ---
+# [file]
+# Extra lockfile glob patterns whose full diffs are never sent to the LLM.
+# Built-in common dependency lockfiles already stay summary-only.
+# lockfile_patterns = ["**/*.lock"]
+
 # --- Workspace (monorepo) ---
 # [workspace]
 # enabled = true

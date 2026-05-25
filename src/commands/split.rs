@@ -8,7 +8,7 @@ use std::sync::Arc;
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
-use super::options::CommitOptions;
+use super::{options::CommitOptions, summarize_lockfile_diffs};
 use crate::commands::commit::DiffStatsJson;
 use crate::commands::json::{self, JsonOutput};
 use crate::config::AppConfig;
@@ -78,6 +78,11 @@ pub async fn run_split_flow(
     let diff = repo.get_staged_diff()?;
     let stats = repo.get_diff_stats(&diff)?;
     let file_diffs = split_diff_by_file(&diff);
+    let (prompt_file_diffs, summarized) =
+        summarize_lockfile_diffs(&file_diffs, &config.file.lockfile_patterns);
+    if summarized {
+        ui::warning(&rust_i18n::t!("diff.truncated"), colored);
+    }
 
     if file_diffs.is_empty() {
         ui::error(&rust_i18n::t!("commit.no_staged_changes"), colored);
@@ -122,7 +127,7 @@ pub async fn run_split_flow(
         // Generate groups
         let mut current_groups = generate_groups(
             provider,
-            &file_diffs,
+            &prompt_file_diffs,
             &stats,
             config,
             &feedbacks,
@@ -707,13 +712,15 @@ async fn handle_split_json_mode(
     let diff = repo.get_staged_diff()?;
     let stats = repo.get_diff_stats(&diff)?;
     let file_diffs = split_diff_by_file(&diff);
+    let (prompt_file_diffs, _) =
+        summarize_lockfile_diffs(&file_diffs, &config.file.lockfile_patterns);
     let branch_name = repo.get_current_branch()?;
     let custom_prompt = config.commit.custom_prompt.clone();
     let scope_info = super::commit::compute_scope_info_pub(&stats.files_changed, config);
 
     match generate_groups(
         provider,
-        &file_diffs,
+        &prompt_file_diffs,
         &stats,
         config,
         initial_feedbacks,

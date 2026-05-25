@@ -106,7 +106,11 @@ pub async fn run_internal(
     };
 
     // Call LLM for review (truncate overly large diffs)
-    let (diff, truncated) = smart_truncate_diff(&diff, config.llm.max_diff_size);
+    let (diff, truncated) = smart_truncate_diff(
+        &diff,
+        config.llm.max_diff_size,
+        &config.file.lockfile_patterns,
+    );
     if truncated && !skip_ui {
         ui::warning(&rust_i18n::t!("diff.truncated"), colored);
     }

@@ -51,7 +51,7 @@ gcop-rs commit 用中文 并 保持 简洁
 - `--json`：输出分组 JSON（包含 `groups`、`diff_stats`、`committed`），不创建提交。
 - 交互模式的操作为：`Accept All`、`Edit`、`Regenerate`、`Regenerate with feedback`、`Quit`。
 
-> **注意**：split 模式当前按文件维度发送 diff，不应用全局 `[llm].max_diff_size` 截断上限。
+> **注意**：split 模式当前按文件维度发送 diff，不应用全局 `[llm].max_diff_size` 截断上限。lockfile 仍会只发送摘要。
 
 > **注意**：`--split` 与 `--amend` 不能同时使用。
 

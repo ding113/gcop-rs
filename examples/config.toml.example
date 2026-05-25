@@ -44,6 +44,13 @@ show_diff_preview = true
 allow_edit = true
 # split = true  # Always use atomic split commit mode
 
+# --- File ---
+[file]
+# Extra lockfile glob patterns whose full diffs are never sent to the LLM.
+# Common dependency lockfiles such as Cargo.lock, yarn.lock, pnpm-lock.yaml,
+# package-lock.json, poetry.lock, go.sum, bun.lock, and deno.lock are built in.
+# lockfile_patterns = ["**/*.lock"]
+
 # --- UI ---
 [ui]
 colored = true

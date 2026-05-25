@@ -162,6 +162,7 @@ max_retry_delay_ms = 60000  # Max retry delay; also limits Retry-After header
 # File Settings
 [file]
 max_size = 10485760      # Max file size for `review file <PATH>` (10MB)
+lockfile_patterns = ["**/*.lock"]  # Extra lockfile patterns summarized in LLM prompts
 
 # Workspace Settings (monorepo scope inference)
 [workspace]
@@ -253,6 +254,11 @@ These settings are prompt-level guidance for commit generation. They influence m
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `max_size` | Integer | `10485760` | Max file size in bytes when using `review file <PATH>` (default: 10MB) |
+| `lockfile_patterns` | Array | `[]` | Extra glob patterns for dependency lockfiles whose full diffs are never sent to the LLM |
+
+Common dependency lockfiles are built in and always sent as summary-only entries in commit/review/hook prompts, including `Cargo.lock`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `poetry.lock`, `Pipfile.lock`, `uv.lock`, `composer.lock`, `Gemfile.lock`, `go.sum`, `go.work.sum`, `bun.lockb`, `bun.lock`, `deno.lock`, `flake.lock`, `conan.lock`, `pubspec.lock`, `mix.lock`, `stack.yaml.lock`, and `Podfile.lock`.
+
+When a lockfile changes, gcop-rs still includes the file name and change counts such as `Cargo.lock (+42 -7) [lockfile]`; only the full patch body is omitted. This also applies when the lockfile is the only changed file.
 
 ### Workspace Settings
 

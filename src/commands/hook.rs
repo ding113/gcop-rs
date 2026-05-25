@@ -265,7 +265,11 @@ async fn run_hook_inner(
     let stats = repo.get_diff_stats(&diff)?;
 
     // Truncate diff to fit LLM token limit
-    let (diff, _) = smart_truncate_diff(&diff, config.llm.max_diff_size);
+    let (diff, _) = smart_truncate_diff(
+        &diff,
+        config.llm.max_diff_size,
+        &config.file.lockfile_patterns,
+    );
 
     // Get current branch name
     let branch_name = repo.get_current_branch()?;

@@ -170,7 +170,10 @@ fn test_get_file_content_respects_custom_max_size() -> Result<()> {
     env::set_current_dir(repo_path)?;
 
     // 自定义 max_size = 512 bytes
-    let file_config = FileConfig { max_size: 512 };
+    let file_config = FileConfig {
+        max_size: 512,
+        ..Default::default()
+    };
     let git_repo = GitRepository::open(Some(&file_config))?;
     let result = git_repo.get_file_content("small.txt");
 
