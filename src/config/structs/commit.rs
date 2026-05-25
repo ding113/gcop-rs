@@ -53,6 +53,9 @@ pub struct CommitConvention {
 /// - `show_diff_preview`: show diff preview before generation (default: `true`)
 /// - `allow_edit`: allow editing generated messages (default: `true`)
 /// - `split`: enable atomic split commit mode by default (default: `false`)
+/// - `skip_llm_for_lockfile_only`: short-circuit the LLM and emit a fixed
+///   `chore(deps): update lockfiles` message when every staged file is a
+///   lockfile (default: `true`)
 /// - `custom_prompt`: prompt customization text (optional; normal mode replaces base system prompt, split mode appends constraints)
 /// - `max_retries`: maximum generation attempts, including the first one (default: `10`)
 /// - `convention`: optional commit convention config
@@ -63,6 +66,7 @@ pub struct CommitConvention {
 /// show_diff_preview = true
 /// allow_edit = true
 /// split = false
+/// skip_llm_for_lockfile_only = true
 /// max_retries = 10
 /// custom_prompt = "Generate a concise commit message"
 ///
@@ -83,6 +87,17 @@ pub struct CommitConfig {
     /// Whether to use atomic split commit mode by default.
     #[serde(default)]
     pub split: bool,
+
+    /// Skip the LLM call and emit a deterministic
+    /// `chore(deps): update lockfiles` commit message when every staged file
+    /// is a recognised lockfile (`Cargo.lock`, `package-lock.json`,
+    /// `yarn.lock`, `pnpm-lock.yaml`, `go.sum`, `bun.lockb`, `uv.lock`,
+    /// `flake.lock`, `Podfile.lock`, …). Honoured by normal, `--amend`,
+    /// `--split`, and `--dry-run` modes. The JSON mode honours the shortcut
+    /// for the generated *message* but never commits, preserving its
+    /// `committed: false` contract.
+    #[serde(default = "default_true")]
+    pub skip_llm_for_lockfile_only: bool,
 
     /// Prompt customization text for commit generation.
     ///
@@ -108,6 +123,7 @@ impl Default for CommitConfig {
             show_diff_preview: true,
             allow_edit: true,
             split: false,
+            skip_llm_for_lockfile_only: true,
             custom_prompt: None,
             max_retries: default_commit_max_retries(),
             convention: None,

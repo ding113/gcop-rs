@@ -102,6 +102,20 @@ pub async fn run_split_flow(
         colored,
     );
 
+    // Lockfile-only shortcut: build a single group with all staged files
+    // and commit it directly, skipping the LLM entirely.
+    if let Some(msg) = crate::commands::try_lockfile_shortcut(&stats.files_changed, config) {
+        let groups = vec![CommitGroup {
+            files: stats.files_changed.clone(),
+            message: msg,
+        }];
+        display_commit_groups(&groups, &file_diffs, colored);
+        if options.dry_run {
+            return Ok(());
+        }
+        return execute_split_commits(repo, &groups, colored);
+    }
+
     // If only 1 file, no need to split - just inform and suggest normal commit
     if file_diffs.len() == 1 {
         ui::warning(&rust_i18n::t!("split.single_file"), colored);
@@ -289,7 +303,7 @@ pub fn parse_split_response(raw: &str, expected_files: &[String]) -> Result<Vec<
     let json_str = strip_code_fences(raw);
 
     // Parse JSON
-    let response: SplitResponse = serde_json::from_str(json_str).map_err(|e| {
+    let mut response: SplitResponse = serde_json::from_str(json_str).map_err(|e| {
         // Truncate preview at char boundary to avoid panic on multi-byte UTF-8
         let preview: String = raw.chars().take(200).collect();
         GcopError::SplitParseFailed(format!(
@@ -297,6 +311,16 @@ pub fn parse_split_response(raw: &str, expected_files: &[String]) -> Result<Vec<
             e, preview
         ))
     })?;
+
+    // Apply deterministic sanitisation to every group message so the split
+    // path matches the single-commit path (which already runs sanitise via
+    // `process_commit_response_with_options`). This drops forbidden trailers,
+    // lowercases the Conventional Commit type, removes trailing periods,
+    // and collapses blank-line runs.
+    for group in &mut response.groups {
+        group.message =
+            crate::llm::provider::base::sanitize::sanitize_commit_message(&group.message);
+    }
 
     if response.groups.is_empty() {
         return Err(GcopError::SplitParseFailed(
@@ -712,6 +736,27 @@ async fn handle_split_json_mode(
     let diff = repo.get_staged_diff()?;
     let stats = repo.get_diff_stats(&diff)?;
     let file_diffs = split_diff_by_file(&diff);
+
+    // Lockfile-only shortcut for `--split --json`: emit a single-group
+    // payload with `committed: false`, matching the JSON mode contract.
+    if let Some(msg) = crate::commands::try_lockfile_shortcut(&stats.files_changed, config) {
+        let groups = vec![CommitGroup {
+            files: stats.files_changed.clone(),
+            message: msg,
+        }];
+        let output = JsonOutput {
+            success: true,
+            data: Some(SplitCommitData {
+                groups,
+                diff_stats: (&stats).into(),
+                committed: false,
+            }),
+            error: None,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
+
     let (prompt_file_diffs, _) =
         summarize_lockfile_diffs(&file_diffs, &config.file.lockfile_patterns);
     let branch_name = repo.get_current_branch()?;

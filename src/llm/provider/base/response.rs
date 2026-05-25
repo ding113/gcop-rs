@@ -125,7 +125,14 @@ pub fn strip_thinking_tags(text: &str) -> String {
     result.trim().to_string()
 }
 
-/// Process commit message response: optionally strip thinking tags, clean code fences, and log
+/// Process commit message response: optionally strip thinking tags, clean
+/// code fences, run the deterministic sanitiser, and log.
+///
+/// Pipeline: `strip_thinking_tags? → clean_commit_response → sanitize_commit_message`.
+/// The sanitiser drops forbidden trailers (Co-authored-by, Signed-off-by,
+/// AI-attribution banners, …), lowercases the Conventional Commit type,
+/// trims a trailing subject period, collapses excess blank lines, and
+/// trims blank edges. See `super::sanitize` for the full contract.
 pub fn process_commit_response_with_options(response: String, strip_thinking: bool) -> String {
     let maybe_stripped = if strip_thinking {
         strip_thinking_tags(&response)
@@ -133,8 +140,9 @@ pub fn process_commit_response_with_options(response: String, strip_thinking: bo
         response
     };
     let cleaned = clean_commit_response(&maybe_stripped);
-    tracing::debug!("Generated commit message: {}", cleaned);
-    cleaned
+    let sanitized = super::sanitize::sanitize_commit_message(&cleaned);
+    tracing::debug!("Generated commit message: {}", sanitized);
+    sanitized
 }
 
 /// Process commit message response with default sanitization.

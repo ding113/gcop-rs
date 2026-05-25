@@ -55,6 +55,7 @@ pub mod stats;
 pub use format::OutputFormat;
 pub use options::{CommitOptions, ReviewOptions, StatsOptions};
 
+use crate::config::AppConfig;
 use crate::git::diff::{FileDiff, split_diff_by_file};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use std::fmt::Write;
@@ -92,6 +93,11 @@ const LOCKFILE_BASENAMES: &[&str] = &[
 
 /// Substrings that usually indicate generated files.
 const AUTO_GENERATED_SUBSTRINGS: &[&str] = &[".generated."];
+
+/// Fixed commit message used by the lockfile-only short-circuit
+/// ([`try_lockfile_shortcut`]). Single source of truth — production code
+/// and tests both refer to this constant rather than literal strings.
+pub const LOCKFILE_SHORTCUT_MESSAGE: &str = "chore(deps): update lockfiles";
 
 /// Returns `true` if `filename` matches an auto-generated file pattern.
 fn is_auto_generated(filename: &str) -> bool {
@@ -176,6 +182,31 @@ fn build_lockfile_globset(patterns: &[String]) -> Option<GlobSet> {
                 None
             }
         }
+    } else {
+        None
+    }
+}
+
+/// Returns `true` when every entry in `files` is a built-in lockfile basename.
+///
+/// Reads only the built-in [`LOCKFILE_BASENAMES`] list (no custom user
+/// patterns), matching the conservative semantics of the original
+/// `commit.skip_llm_for_lockfile_only` short-circuit: it is meant for the
+/// uncontroversial "this commit literally only bumps a known lockfile" case.
+pub fn all_files_are_lockfiles(files: &[String]) -> bool {
+    if files.is_empty() {
+        return false;
+    }
+    let matcher = LockfileMatcher::new(&[]);
+    files.iter().all(|f| matcher.is_match(f))
+}
+
+/// Returns the deterministic shortcut message iff every staged file is a
+/// lockfile and the config has the shortcut enabled. Otherwise returns
+/// `None` and the caller falls through to the LLM path.
+pub fn try_lockfile_shortcut(staged_files: &[String], config: &AppConfig) -> Option<String> {
+    if config.commit.skip_llm_for_lockfile_only && all_files_are_lockfiles(staged_files) {
+        Some(LOCKFILE_SHORTCUT_MESSAGE.to_string())
     } else {
         None
     }
@@ -458,6 +489,78 @@ mod tests {
         let (result, truncated) = smart_truncate_diff("", 1000, &[]);
         assert!(!truncated);
         assert_eq!(result, "");
+    }
+
+    // ============================== lockfile predicates ==============================
+
+    // Note: built-in basename detection is already covered by upstream's
+    // `test_is_lockfile_builtin_basenames` / `_custom_patterns`. Our
+    // previous single-arg `test_is_lockfile_*` tests targeted the removed
+    // `pub fn is_lockfile(path)` API and have been collapsed into the
+    // upstream coverage. The `all_files_are_lockfiles` / `try_lockfile_shortcut`
+    // tests below remain because they cover the shortcut layer we add.
+
+    #[test]
+    fn test_all_files_are_lockfiles_pure_lock() {
+        let files = vec!["Cargo.lock".to_string(), "yarn.lock".to_string()];
+        assert!(all_files_are_lockfiles(&files));
+    }
+
+    #[test]
+    fn test_all_files_are_lockfiles_mixed() {
+        let files = vec!["Cargo.lock".to_string(), "src/main.rs".to_string()];
+        assert!(!all_files_are_lockfiles(&files));
+    }
+
+    #[test]
+    fn test_all_files_are_lockfiles_empty_returns_false() {
+        // An empty changeset must not be treated as lockfile-only.
+        let files: Vec<String> = vec![];
+        assert!(!all_files_are_lockfiles(&files));
+    }
+
+    #[test]
+    fn test_all_files_are_lockfiles_nested_paths() {
+        let files = vec![
+            "packages/a/yarn.lock".to_string(),
+            "packages/b/Cargo.lock".to_string(),
+            "go.sum".to_string(),
+        ];
+        assert!(all_files_are_lockfiles(&files));
+    }
+
+    #[test]
+    fn test_try_lockfile_shortcut_enabled() {
+        let mut config = AppConfig::default();
+        config.commit.skip_llm_for_lockfile_only = true;
+        let files = vec!["Cargo.lock".to_string()];
+        assert_eq!(
+            try_lockfile_shortcut(&files, &config),
+            Some(LOCKFILE_SHORTCUT_MESSAGE.to_string())
+        );
+    }
+
+    #[test]
+    fn test_try_lockfile_shortcut_disabled_by_config() {
+        let mut config = AppConfig::default();
+        config.commit.skip_llm_for_lockfile_only = false;
+        let files = vec!["Cargo.lock".to_string()];
+        assert_eq!(try_lockfile_shortcut(&files, &config), None);
+    }
+
+    #[test]
+    fn test_try_lockfile_shortcut_mixed_files_no_shortcut() {
+        let mut config = AppConfig::default();
+        config.commit.skip_llm_for_lockfile_only = true;
+        let files = vec!["Cargo.lock".to_string(), "src/main.rs".to_string()];
+        assert_eq!(try_lockfile_shortcut(&files, &config), None);
+    }
+
+    #[test]
+    fn test_try_lockfile_shortcut_empty_no_shortcut() {
+        let config = AppConfig::default();
+        let files: Vec<String> = vec![];
+        assert_eq!(try_lockfile_shortcut(&files, &config), None);
     }
 
     #[test]

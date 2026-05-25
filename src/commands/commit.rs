@@ -113,6 +113,36 @@ async fn run_with_deps(
     // Get diff statistics
     let stats = repo.get_diff_stats(&diff)?;
 
+    // Lockfile-only shortcut — when every staged file is a dependency
+    // lockfile we emit a deterministic message instead of spending an LLM
+    // call. Honours dry-run (display only) and amend (rewrite the previous
+    // commit) the same way the LLM path does.
+    if let Some(msg) = super::try_lockfile_shortcut(&stats.files_changed, config) {
+        ui::step(
+            &rust_i18n::t!("commit.step1"),
+            &rust_i18n::t!(
+                "commit.analyzed",
+                files = stats.files_changed.len(),
+                changes = stats.insertions + stats.deletions
+            ),
+            colored,
+        );
+        if options.dry_run {
+            display_message(&msg, 0, colored);
+            return Ok(());
+        }
+        if options.amend {
+            repo.commit_amend(&msg)?;
+            println!();
+            ui::success(&rust_i18n::t!("commit.amend_success"), colored);
+        } else {
+            repo.commit(&msg)?;
+            println!();
+            ui::success(&rust_i18n::t!("commit.success"), colored);
+        }
+        return Ok(());
+    }
+
     // Truncate overly large diffs to prevent tokens from exceeding the limit
     let (diff, truncated) = smart_truncate_diff(
         &diff,
@@ -247,6 +277,14 @@ async fn handle_json_mode(
     }
     let diff = get_diff(repo, options.amend)?;
     let stats = repo.get_diff_stats(&diff)?;
+
+    // Lockfile-only shortcut for JSON mode. Stays `committed: false` to
+    // preserve the existing dry-run contract of `--json` — callers always
+    // decide whether to actually commit, even when the message is fixed.
+    if let Some(msg) = super::try_lockfile_shortcut(&stats.files_changed, config) {
+        return output_json_success(&msg, &stats, false);
+    }
+
     let (diff, _truncated) = smart_truncate_diff(
         &diff,
         config.llm.max_diff_size,
