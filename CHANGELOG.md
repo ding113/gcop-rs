@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-05-25
+
+### Added
+
+- **OpenAI Responses API**: New `api_style = "openai-response"` sends prompts to `/v1/responses` with full streaming support, error handling, and CI mode integration
+- **strip_thinking Option**: `strip_thinking = true` in any provider config removes `<thinking>...</thinking>` and ` вдруг...</вдруг>` blocks; FallbackProvider respects per-provider setting
+- **GCOP_SKIP_HOOK**: `GCOP_SKIP_HOOK=1` environment variable skips `gcop-rs hook run` at shell, Rust runner, and CLI levels; `commit_changes()` and `commit_amend_changes()` set it to avoid double-processing
+- **Hook --force Refresh**: `gcop-rs hook install --force` now refreshes existing gcop-rs hooks
+
+### Changed
+
+- **Diff Parsing**: Returns new path (`b/`) for renames; rewritten quoted path handling; hunk-aware `@@` tracking for accurate `+++`/`---` counting; git similarity detection enabled in `get_staged_diff()`
+- **Git Repository**: `stage_files()` uses `git add -A --` for deletions/renames; `unstage_all()` checks staged files first in empty repos; `get_staged_diff()` force-reloads index; extracted `resolve_commit_trees()` to deduplicate code
+- **Stats**: Author sort stabilized with name/email tie-breaks; merge commit count scoped to author filter; extracted reusable author filtering functions
+- **Dependencies**: `git2` 0.20 → 0.21, `rust-i18n` 3.1 → 4.0, `tokio` 1.50 → 1.52, `toml` 1.0 → 1.1, `human-panic` 2.0.6 → 2.0.8; removed unused `cesu8`, `iri-string`, `pin-utils`
+- **Documentation**: Updated `init` step 2, provider docs with Responses API and `strip_thinking` examples, config examples
+
 ## [0.13.9] - 2026-03-22
 
 ### Security
@@ -705,7 +722,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Edit action properly returns to menu without triggering regeneration
 - Commit message display no longer duplicates after editing
 
-[Unreleased]: https://github.com/AptS-1547/gcop-rs/compare/v0.13.3...HEAD
+[Unreleased]: https://github.com/AptS-1547/gcop-rs/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/AptS-1547/gcop-rs/compare/v0.13.9...v0.14.0
+[0.13.9]: https://github.com/AptS-1547/gcop-rs/compare/v0.13.8...v0.13.9
+[0.13.8]: https://github.com/AptS-1547/gcop-rs/compare/v0.13.7...v0.13.8
+[0.13.7]: https://github.com/AptS-1547/gcop-rs/compare/v0.13.6...v0.13.7
+[0.13.6]: https://github.com/AptS-1547/gcop-rs/compare/v0.13.5...v0.13.6
+[0.13.5]: https://github.com/AptS-1547/gcop-rs/compare/v0.13.4...v0.13.5
+[0.13.4]: https://github.com/AptS-1547/gcop-rs/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/AptS-1547/gcop-rs/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/AptS-1547/gcop-rs/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/AptS-1547/gcop-rs/compare/v0.13.0...v0.13.1
