@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **OpenAI Responses API**: New `api_style = "openai-response"` sends prompts to `/v1/responses` with full streaming support, error handling, and CI mode integration
-- **strip_thinking Option**: `strip_thinking = true` in any provider config removes `<thinking>...</thinking>` and ` вдруг...</вдруг>` blocks; FallbackProvider respects per-provider setting
+- **strip_thinking Option**: `strip_thinking = true` in any provider config removes `<thinking>...</thinking>` and `<think>...</think>` blocks; FallbackProvider respects per-provider setting
 - **GCOP_SKIP_HOOK**: `GCOP_SKIP_HOOK=1` environment variable skips `gcop-rs hook run` at shell, Rust runner, and CLI levels; `commit_changes()` and `commit_amend_changes()` set it to avoid double-processing
 - **Hook --force Refresh**: `gcop-rs hook install --force` now refreshes existing gcop-rs hooks
 
