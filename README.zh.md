@@ -119,6 +119,18 @@ commit 流程是交互式的 — 生成后可以选择**接受**、**编辑**、
 
 管理：`--list`、`--force`、`--remove --force`。详见[别名指南](https://gcop.docs.esap.cc/zh/guide/aliases)。
 
+## Roadmap
+
+当前 Roadmap 会先打磨可靠性和可维护性，再继续扩展功能面。下一步优先推进公开重构计划 [#39](https://github.com/AptS-1547/gcop-rs/issues/39)：拆分高频维护模块，减少 commit 生成流程中的重复逻辑。
+
+后续规划分为三个阶段：
+
+- **阶段一：可靠性诊断与日常工作流闭环**（[#40](https://github.com/AptS-1547/gcop-rs/issues/40)）— 新增 `gcop-rs doctor`，增强 `review` 的 CI 用法，加入 commit message 校验，并让默认 split 模式更容易临时关闭。
+- **阶段二：LLM 质量边界与机器可读输出契约**（[#41](https://github.com/AptS-1547/gcop-rs/issues/41)）— 建立 prompt / response 回归 fixtures，增加 provider 能力声明，稳定 JSON schema version，并为 split commit 恢复机制打基础。
+- **阶段三：发行体验与生态完善**（[#42](https://github.com/AptS-1547/gcop-rs/issues/42)）— 增加 shell completions、man page 或自动生成命令参考、详细版本信息、release 校验和，以及更完整的安装文档。
+
+这个 Roadmap 的重点不是继续堆命令，而是先把 AI 生成工作流做稳、让失败更容易诊断，并保证自动化场景里的输出可靠。
+
 ## 文档
 
 - [安装指南](https://gcop.docs.esap.cc/zh/guide/installation) — 所有安装方式

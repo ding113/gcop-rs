@@ -9,7 +9,7 @@ AI-powered Git CLI — generate commit messages, review code, manage workflows, 
 
 > Rust rewrite inspired by [gcop](https://github.com/Undertone0809/gcop) by [Undertone0809](https://github.com/Undertone0809).
 
-**[中文文档](README_ZH.md)** | **[Documentation](https://gcop.docs.esap.cc/)**
+**[中文文档](README.zh.md)** | **[Documentation](https://gcop.docs.esap.cc/)**
 
 ## Features
 
@@ -118,6 +118,18 @@ Install with `gcop-rs alias` or during `gcop-rs init`.
 | `git undo` | Undo last commit (keep staged) |
 
 Manage: `--list`, `--force`, `--remove --force`. See [Aliases Guide](https://gcop.docs.esap.cc/guide/aliases).
+
+## Roadmap
+
+The current roadmap focuses on reliability and maintainability before adding more surface area. The next implementation priority is the public refactor plan in [#39](https://github.com/AptS-1547/gcop-rs/issues/39), which splits high-traffic modules and reduces duplicated commit generation logic.
+
+Planned follow-up phases:
+
+- **Phase 1: Reliability diagnostics and daily workflow polish** ([#40](https://github.com/AptS-1547/gcop-rs/issues/40)) — add `gcop-rs doctor`, improve `review` for CI usage, add commit message validation, and make split mode easier to override.
+- **Phase 2: LLM quality guardrails and machine-readable contracts** ([#41](https://github.com/AptS-1547/gcop-rs/issues/41)) — add prompt/response regression fixtures, provider capability metadata, stable JSON schema versions, and groundwork for split commit recovery.
+- **Phase 3: Distribution and ecosystem polish** ([#42](https://github.com/AptS-1547/gcop-rs/issues/42)) — add shell completions, man pages or generated CLI references, verbose version metadata, release checksums, and stronger installation docs.
+
+The roadmap is intentionally scoped: stabilize AI-generated workflows, make failures diagnosable, and keep automation-friendly output reliable before expanding into larger new features.
 
 ## Documentation
 
