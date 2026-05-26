@@ -386,6 +386,7 @@ fn make_test_provider() -> structs::ProviderConfig {
         model: "test-model".to_string(),
         max_tokens: None,
         temperature: None,
+        context_window: None,
         extra: Default::default(),
     }
 }
@@ -628,4 +629,151 @@ style = "conventional"
     assert!(conv.types.is_none());
     assert!(conv.template.is_none());
     assert!(conv.extra_prompt.is_none());
+}
+
+// === HistoryRefConfig / ProviderConfig.context_window tests (Iteration F) ===
+
+#[test]
+fn test_history_config_default_values() {
+    let cfg = structs::CommitConfig::default();
+    assert!(cfg.history.enabled);
+    assert_eq!(cfg.history.count, 30);
+    assert!(cfg.history.max_chars.is_none());
+    assert!((cfg.history.max_chars_ratio - 0.05).abs() < 1e-6);
+    assert!(cfg.history.skip_merges);
+    assert!(cfg.history.prefer_format);
+    assert!(cfg.history.include_body);
+    assert!(cfg.history.chars_per_token.is_none());
+}
+
+#[test]
+fn test_app_config_validate_rejects_context_window_zero() {
+    let mut config = AppConfig::default();
+    let provider = structs::ProviderConfig {
+        api_style: None,
+        endpoint: None,
+        api_key: Some("sk-test".to_string()),
+        model: "test".to_string(),
+        max_tokens: None,
+        temperature: None,
+        context_window: Some(0),
+        extra: Default::default(),
+    };
+    config.llm.providers.insert("test".to_string(), provider);
+    config.llm.default_provider = "test".to_string();
+    let err = config
+        .validate()
+        .expect_err("context_window=0 should be rejected");
+    assert!(format!("{err}").contains("context_window"));
+}
+
+#[test]
+fn test_app_config_validate_rejects_context_window_absurdly_large() {
+    let mut config = AppConfig::default();
+    let provider = structs::ProviderConfig {
+        api_style: None,
+        endpoint: None,
+        api_key: Some("sk-test".to_string()),
+        model: "test".to_string(),
+        max_tokens: None,
+        temperature: None,
+        context_window: Some(usize::MAX),
+        extra: Default::default(),
+    };
+    config.llm.providers.insert("test".to_string(), provider);
+    config.llm.default_provider = "test".to_string();
+    let err = config
+        .validate()
+        .expect_err("context_window > 10M should be rejected");
+    assert!(format!("{err}").contains("context_window"));
+}
+
+#[test]
+fn test_history_config_partial_toml_override() {
+    use config::{Config, File, FileFormat};
+
+    let toml_content = r#"
+[commit.history]
+count = 5
+enabled = false
+"#;
+    let app_config: AppConfig = Config::builder()
+        .add_source(File::from_str(toml_content, FileFormat::Toml))
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap();
+
+    let h = &app_config.commit.history;
+    assert!(!h.enabled);
+    assert_eq!(h.count, 5);
+    // Untouched fields keep their defaults.
+    assert!(h.max_chars.is_none());
+    assert!((h.max_chars_ratio - 0.05).abs() < 1e-6);
+    assert!(h.skip_merges);
+    assert!(h.prefer_format);
+    assert!(h.include_body);
+}
+
+#[test]
+fn test_app_config_validate_rejects_history_count_zero() {
+    let mut config = AppConfig::default();
+    config.commit.history.count = 0;
+    let err = config.validate().expect_err("count=0 should be rejected");
+    let msg = format!("{err}");
+    assert!(msg.contains("commit.history.count"), "msg was: {msg}");
+}
+
+#[test]
+fn test_app_config_validate_rejects_history_count_too_high() {
+    let mut config = AppConfig::default();
+    config.commit.history.count = 201;
+    let err = config.validate().expect_err("count>200 should be rejected");
+    let msg = format!("{err}");
+    assert!(msg.contains("commit.history.count"), "msg was: {msg}");
+}
+
+#[test]
+fn test_app_config_validate_rejects_history_ratio_above_half() {
+    let mut config = AppConfig::default();
+    config.commit.history.max_chars_ratio = 0.7;
+    let err = config.validate().expect_err("ratio>0.5 should be rejected");
+    let msg = format!("{err}");
+    assert!(msg.contains("max_chars_ratio"), "msg was: {msg}");
+}
+
+#[test]
+fn test_app_config_validate_allows_history_when_disabled() {
+    let mut config = AppConfig::default();
+    // Out-of-range values are tolerated when the feature is disabled, so users
+    // can keep settings around without re-enabling them just to satisfy bounds.
+    config.commit.history.enabled = false;
+    config.commit.history.count = 0;
+    config.commit.history.max_chars_ratio = 1.0;
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_provider_config_context_window_field_roundtrip() {
+    use config::{Config, File, FileFormat};
+
+    let toml_content = r#"
+[llm]
+default_provider = "foo"
+
+[llm.providers.foo]
+model = "custom-bar"
+api_key = "sk-test"
+context_window = 250000
+"#;
+    let app_config: AppConfig = Config::builder()
+        .add_source(File::from_str(toml_content, FileFormat::Toml))
+        .build()
+        .unwrap()
+        .try_deserialize()
+        .unwrap();
+
+    let provider = app_config.llm.providers.get("foo").unwrap();
+    assert_eq!(provider.context_window, Some(250_000));
+    assert_eq!(provider.model, "custom-bar");
 }

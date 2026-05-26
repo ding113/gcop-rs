@@ -101,6 +101,24 @@ impl AppConfig {
         for (name, provider) in &self.llm.providers {
             provider.validate(name)?;
         }
+
+        // Validate history-injection bounds.
+        let history = &self.commit.history;
+        if history.enabled {
+            if history.count == 0 || history.count > 200 {
+                return Err(GcopError::Config(format!(
+                    "commit.history.count {} out of range [1, 200]",
+                    history.count
+                )));
+            }
+            if !(0.0..=0.5).contains(&history.max_chars_ratio) {
+                return Err(GcopError::Config(format!(
+                    "commit.history.max_chars_ratio {} out of range [0.0, 0.5]",
+                    history.max_chars_ratio
+                )));
+            }
+        }
+
         self.network.validate()?;
         Ok(())
     }

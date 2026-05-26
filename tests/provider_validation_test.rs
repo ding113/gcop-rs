@@ -43,6 +43,7 @@ async fn test_claude_validate_success() {
         model: "claude-3-haiku-20240307".to_string(),
         max_tokens: None,
         temperature: None,
+        context_window: None,
         extra: HashMap::new(),
     };
 
@@ -71,6 +72,7 @@ async fn test_claude_validate_401_unauthorized() {
         model: "claude-3-haiku-20240307".to_string(),
         max_tokens: None,
         temperature: None,
+        context_window: None,
         extra: HashMap::new(),
     };
 
@@ -108,6 +110,7 @@ async fn test_claude_validate_429_rate_limit() {
         model: "claude-3-haiku-20240307".to_string(),
         max_tokens: None,
         temperature: None,
+        context_window: None,
         extra: HashMap::new(),
     };
 
@@ -137,6 +140,7 @@ async fn test_claude_validate_empty_api_key() {
         model: "claude-3-haiku-20240307".to_string(),
         max_tokens: None,
         temperature: None,
+        context_window: None,
         extra: HashMap::new(),
     };
 
@@ -175,6 +179,7 @@ async fn test_openai_validate_success() {
         model: "gpt-4o-mini".to_string(),
         max_tokens: None,
         temperature: None,
+        context_window: None,
         extra: HashMap::new(),
     };
 
@@ -203,6 +208,7 @@ async fn test_openai_validate_401_unauthorized() {
         model: "gpt-4o-mini".to_string(),
         max_tokens: None,
         temperature: None,
+        context_window: None,
         extra: HashMap::new(),
     };
 
@@ -243,6 +249,7 @@ async fn test_ollama_validate_success() {
         model: "llama3.2".to_string(),
         max_tokens: None,
         temperature: None,
+        context_window: None,
         extra: HashMap::new(),
     };
 
@@ -272,6 +279,7 @@ async fn test_ollama_validate_model_not_found() {
         model: "mistral".to_string(), // 不存在的模型
         max_tokens: None,
         temperature: None,
+        context_window: None,
         extra: HashMap::new(),
     };
 
@@ -302,6 +310,7 @@ async fn test_ollama_validate_connection_error() {
         model: "llama3.2".to_string(),
         max_tokens: None,
         temperature: None,
+        context_window: None,
         extra: HashMap::new(),
     };
 

@@ -160,6 +160,7 @@ fn apply_ci_mode_overrides(config: &mut AppConfig) -> Result<()> {
         model,
         max_tokens: None,
         temperature: None,
+        context_window: None,
         extra: Default::default(),
     };
 

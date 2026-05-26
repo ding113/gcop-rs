@@ -123,6 +123,14 @@ pub struct ProviderConfig {
     /// Sampling temperature in `0.0..=2.0`.
     pub temperature: Option<f32>,
 
+    /// Model context window in tokens.
+    ///
+    /// When set, takes precedence over the in-code `KNOWN_MODEL_CONTEXTS`
+    /// lookup table used by `crate::llm::budget::model_context_window`.
+    /// Leave `None` to let the budget calculator infer from the model name.
+    #[serde(default)]
+    pub context_window: Option<usize>,
+
     /// Additional provider-specific parameters.
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
@@ -139,6 +147,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("model", &self.model)
             .field("max_tokens", &self.max_tokens)
             .field("temperature", &self.temperature)
+            .field("context_window", &self.context_window)
             .finish()
     }
 }
@@ -157,6 +166,14 @@ impl ProviderConfig {
             return Err(GcopError::Config(format!(
                 "Provider '{}': temperature {} out of range [0.0, 2.0]",
                 name, temp
+            )));
+        }
+        if let Some(window) = self.context_window
+            && (window == 0 || window > 10_000_000)
+        {
+            return Err(GcopError::Config(format!(
+                "Provider '{}': context_window {} out of range (1..=10_000_000)",
+                name, window
             )));
         }
         if let Some(ref key) = self.api_key
