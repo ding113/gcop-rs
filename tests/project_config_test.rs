@@ -33,6 +33,7 @@ fn test_convention_conventional_e2e() {
         user_feedback: vec![],
         convention: Some(convention),
         scope_info: None,
+        historical_examples: Vec::new(),
     };
 
     let diff = "diff --git a/src/lib.rs b/src/lib.rs\n+pub fn authenticate() {}";
@@ -72,6 +73,7 @@ fn test_convention_gitmoji_e2e() {
         user_feedback: vec![],
         convention: Some(convention),
         scope_info: None,
+        historical_examples: Vec::new(),
     };
 
     let (system, _) =
@@ -100,6 +102,7 @@ fn test_convention_custom_with_template_e2e() {
         user_feedback: vec![],
         convention: Some(convention),
         scope_info: None,
+        historical_examples: Vec::new(),
     };
 
     let (system, _) =
@@ -134,6 +137,7 @@ fn test_convention_with_custom_prompt_e2e() {
         user_feedback: vec![],
         convention: Some(convention),
         scope_info: None,
+        historical_examples: Vec::new(),
     };
 
     let (system, _) = build_commit_prompt_split(
@@ -167,6 +171,7 @@ fn test_convention_with_feedback_e2e() {
         user_feedback: vec!["请使用中文".to_string()],
         convention: Some(convention),
         scope_info: None,
+        historical_examples: Vec::new(),
     };
 
     let (system, user) =
@@ -191,6 +196,7 @@ fn test_no_convention_no_section_e2e() {
         user_feedback: vec![],
         convention: None,
         scope_info: None,
+        historical_examples: Vec::new(),
     };
 
     let (system, _) = build_commit_prompt_split("diff", &context, None, None);

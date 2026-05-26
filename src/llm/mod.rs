@@ -3,6 +3,10 @@
 //! This module defines the provider interface used by commit generation
 //! and code review flows.
 
+/// Context-window estimation and char budget for history injection.
+pub mod budget;
+/// Historical commit sampler (format classifier, scoring, budgeting).
+pub mod history_sampler;
 /// Prompt-building utilities for commit/review flows.
 pub mod prompt;
 /// Built-in provider implementations and factory helpers.
@@ -310,6 +314,7 @@ pub struct ScopeInfo {
 ///     user_feedback: vec!["Be more specific".to_string()],
 ///     convention: None,
 ///     scope_info: None,
+///     historical_examples: vec![],
 /// };
 /// ```
 #[derive(Debug, Clone, Default)]
@@ -333,6 +338,12 @@ pub struct CommitContext {
     pub convention: Option<CommitConvention>,
     /// Workspace scope metadata (`None` when detection is disabled or not applicable).
     pub scope_info: Option<ScopeInfo>,
+    /// Pre-formatted historical commit messages injected as style references.
+    ///
+    /// Each entry is one prompt-ready string (subject or
+    /// `subject\n\nbody`) already truncated to fit the configured char
+    /// budget. Empty vec disables the section entirely.
+    pub historical_examples: Vec<String>,
 }
 
 /// Review target type.

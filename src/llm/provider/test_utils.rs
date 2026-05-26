@@ -70,6 +70,7 @@ pub fn test_provider_config(
         model,
         max_tokens: None,
         temperature: None,
+        context_window: None,
         extra: HashMap::new(),
     }
 }

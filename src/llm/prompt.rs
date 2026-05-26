@@ -42,6 +42,47 @@ fn format_feedbacks(feedbacks: &[String]) -> String {
     result
 }
 
+/// Format historical commit-message reference list.
+///
+/// Renders each entry as a numbered item. When an entry contains body lines
+/// (subject + `"\n\n"` + body), the body lines are indented by 3 spaces so
+/// CommonMark parsers (and LLMs that mimic that semantic) keep the body as
+/// continuation of the list item instead of starting a new top-level
+/// paragraph. Returns an empty string when `examples` is empty so the prompt
+/// has no orphan header.
+fn format_historical_examples(examples: &[String]) -> String {
+    if examples.is_empty() {
+        return String::new();
+    }
+    let mut result = String::from("\n\n## Project commit-style references (newest first):\n");
+    for (i, ex) in examples.iter().enumerate() {
+        result.push_str(&render_history_entry(i + 1, ex));
+        result.push_str("\n\n");
+    }
+    result.trim_end().to_string() + "\n"
+}
+
+/// Render one historical-example entry as a numbered list item. The first
+/// line becomes the list-item heading; subsequent lines are indented 3
+/// spaces so they survive markdown's "blank line terminates list" rule.
+fn render_history_entry(index: usize, ex: &str) -> String {
+    let mut lines = ex.lines();
+    let first = lines.next().unwrap_or("");
+    let mut out = format!("{}. {}", index, first);
+    for line in lines {
+        out.push('\n');
+        // Always emit the 3-space continuation prefix, even for blank lines,
+        // so the body stays anchored to the list item across paragraph breaks.
+        if line.is_empty() {
+            out.push_str("  ");
+        } else {
+            out.push_str("   ");
+            out.push_str(line);
+        }
+    }
+    out
+}
+
 /// Formatting convention constraint to prompt fragment
 fn format_convention(convention: &CommitConvention) -> String {
     let mut parts = Vec::new();
@@ -123,10 +164,11 @@ fn build_context_section(context: &CommitContext) -> String {
         .unwrap_or_default();
 
     format!(
-        "{}{}{}",
+        "{}{}{}{}",
         branch_info,
         scope_section,
-        format_feedbacks(&context.user_feedback)
+        format_feedbacks(&context.user_feedback),
+        format_historical_examples(&context.historical_examples),
     )
 }
 
@@ -284,6 +326,7 @@ mod tests {
             user_feedback: feedbacks.into_iter().map(String::from).collect(),
             convention: None,
             scope_info: None,
+            historical_examples: Vec::new(),
         }
     }
 
@@ -478,6 +521,7 @@ mod tests {
                 suggested_scope: Some("core".into()),
                 has_root_changes: false,
             }),
+            historical_examples: Vec::new(),
         };
         let (_, user) = build_commit_prompt_split("diff", &ctx, None, None);
 
@@ -496,6 +540,91 @@ mod tests {
         assert!(!user.contains("## Workspace:"));
     }
 
+    // === Historical examples injection (Iteration G) ===
+
+    #[test]
+    fn test_format_historical_examples_empty_returns_empty_string() {
+        assert_eq!(format_historical_examples(&[]), "");
+    }
+
+    #[test]
+    fn test_format_historical_examples_numbered_list() {
+        let out = format_historical_examples(&["feat: a".into(), "fix: b".into()]);
+        assert!(out.contains("## Project commit-style references"));
+        assert!(out.contains("1. feat: a"));
+        assert!(out.contains("2. fix: b"));
+    }
+
+    #[test]
+    fn test_commit_prompt_split_includes_history_section() {
+        let mut ctx = create_context(vec!["a.rs"], 1, 1, None, vec![]);
+        ctx.historical_examples = vec!["feat: x".into(), "fix(scope): y".into()];
+        let (system, user) = build_commit_prompt_split("diff", &ctx, None, None);
+
+        // History lives in the user message (cacheable system stays clean)
+        assert!(!system.contains("Project commit-style references"));
+        assert!(user.contains("Project commit-style references"));
+        assert!(user.contains("feat: x"));
+        assert!(user.contains("fix(scope): y"));
+    }
+
+    #[test]
+    fn test_split_commit_prompt_also_includes_history_section() {
+        let mut ctx = create_context(vec!["a.rs"], 1, 1, None, vec![]);
+        ctx.historical_examples = vec!["chore: bump deps".into()];
+        let diffs = vec![crate::git::diff::FileDiff {
+            filename: "a.rs".to_string(),
+            content: "+code".to_string(),
+            insertions: 1,
+            deletions: 1,
+        }];
+        let (system, user) = build_split_commit_prompt(&diffs, &ctx, None, None);
+        assert!(!system.contains("Project commit-style references"));
+        assert!(user.contains("Project commit-style references"));
+        assert!(user.contains("chore: bump deps"));
+    }
+
+    #[test]
+    fn test_format_historical_examples_indents_multi_line_body() {
+        // Multi-line body should be indented by 3 spaces so CommonMark sees
+        // it as list-item continuation, not a new top-level paragraph.
+        let ex = "feat: foo\n\nbody line 1\nbody line 2".to_string();
+        let out = format_historical_examples(&[ex]);
+        assert!(out.contains("1. feat: foo"));
+        // Each body line must be indented with 3 spaces.
+        assert!(out.contains("   body line 1"));
+        assert!(out.contains("   body line 2"));
+        // The unindented form must NOT appear.
+        assert!(!out.contains("\nbody line 1"));
+    }
+
+    #[test]
+    fn test_format_historical_examples_multi_entry_with_bodies() {
+        let entries = vec![
+            "feat: alpha\n\nfirst body".to_string(),
+            "fix: beta\n\nsecond body".to_string(),
+        ];
+        let out = format_historical_examples(&entries);
+        assert!(out.contains("1. feat: alpha"));
+        assert!(out.contains("   first body"));
+        assert!(out.contains("2. fix: beta"));
+        assert!(out.contains("   second body"));
+    }
+
+    #[test]
+    fn test_format_historical_examples_quotes_delimiter_in_body() {
+        // A body that contains our section header literally should still
+        // render — the numbered-list prefix prevents the LLM from misreading it
+        // as a new section header.
+        let body_with_marker =
+            "feat: edge case\n\n## Project commit-style references inside body".to_string();
+        let out = format_historical_examples(&[body_with_marker]);
+        assert!(out.contains("1. feat: edge case"));
+        assert!(out.contains("## Project commit-style references inside body"));
+        // Two occurrences total: header + the embedded one
+        assert_eq!(out.matches("## Project commit-style references").count(), 2);
+    }
+
     #[test]
     fn test_commit_prompt_scope_with_root_changes() {
         let ctx = CommitContext {
@@ -512,6 +641,7 @@ mod tests {
                 suggested_scope: Some("core".into()),
                 has_root_changes: true,
             }),
+            historical_examples: Vec::new(),
         };
         let (_, user) = build_commit_prompt_split("diff", &ctx, None, None);
 

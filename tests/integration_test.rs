@@ -75,6 +75,7 @@ index 1234567..abcdefg 100644
         user_feedback: vec![],
         convention: None,
         scope_info: None,
+        historical_examples: Vec::new(),
     };
 
     let (system, user) = build_commit_prompt_split(diff, &context, None, None);
@@ -179,6 +180,7 @@ fn test_user_feedback_accumulation() {
         ],
         convention: None,
         scope_info: None,
+        historical_examples: Vec::new(),
     };
 
     let (_, user) = build_commit_prompt_split("diff", &context, None, None);

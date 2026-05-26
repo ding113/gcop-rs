@@ -673,6 +673,7 @@ mod tests {
             model: "gpt-5-mini".to_string(),
             max_tokens: None,
             temperature: None,
+            context_window: None,
             extra: HashMap::new(),
         }
     }
