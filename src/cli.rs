@@ -140,6 +140,13 @@ pub enum Commands {
         #[command(subcommand)]
         action: HookAction,
     },
+
+    /// Integrate gcop-rs with a coding agent (Claude Code, Codex).
+    Agent {
+        /// Agent action to run.
+        #[command(subcommand)]
+        action: AgentAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -204,4 +211,55 @@ pub enum HookAction {
         #[arg(default_value = "")]
         sha: String,
     },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+/// Actions for the `agent` command.
+pub enum AgentAction {
+    /// Install gcop-rs skill and prompt block for a coding agent.
+    Install {
+        /// Which agent to install for: `claude`, `codex`, or `all`.
+        target: AgentTarget,
+
+        /// Overwrite a non-gcop SKILL.md if one already exists.
+        ///
+        /// The CLAUDE.md / AGENTS.md sentinel block is always safe to
+        /// (re-)install without `--force` — it preserves surrounding user
+        /// content via append/replace semantics, and refuses to touch a
+        /// corrupted block.
+        #[arg(short, long)]
+        force: bool,
+
+        /// Dry-run: report what would happen without touching any files.
+        #[arg(short, long)]
+        check: bool,
+
+        /// Only install the SKILL.md half (skip CLAUDE.md / AGENTS.md block).
+        #[arg(long, conflicts_with = "instructions_only")]
+        skill_only: bool,
+
+        /// Only install the CLAUDE.md / AGENTS.md block (skip SKILL.md).
+        #[arg(long, conflicts_with = "skill_only")]
+        instructions_only: bool,
+    },
+
+    /// Remove gcop-rs skill and prompt block for a coding agent.
+    Uninstall {
+        /// Which agent to uninstall from: `claude`, `codex`, or `all`.
+        target: AgentTarget,
+    },
+
+    /// Report install status for both coding agents.
+    Status,
+}
+
+/// Which coding agent (or all of them) an `agent` subcommand acts on.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentTarget {
+    /// Anthropic Claude Code (`~/.claude/`).
+    Claude,
+    /// OpenAI Codex (`~/.codex/`).
+    Codex,
+    /// Both — runs each install/uninstall and aggregates errors.
+    All,
 }

@@ -25,6 +25,8 @@
 //!   └── shared command options (commands/options.rs)
 //! ```
 
+/// Coding-agent integration commands (Claude Code, Codex, ...).
+pub mod agent;
 /// Git alias management commands.
 pub mod alias;
 /// Commit generation command flow.

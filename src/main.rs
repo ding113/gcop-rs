@@ -172,8 +172,70 @@ fn main() -> Result<()> {
                 }
                 Ok(())
             }
+            Commands::Agent { ref action } => {
+                if let Err(e) = run_agent_action(action.clone(), config.ui.colored) {
+                    handle_command_error(&e, config.ui.colored);
+                }
+                Ok(())
+            }
         }
     })
+}
+
+/// Dispatch the agent subcommand. Lives in a separate function so we can
+/// keep `match cli.command` shallow.
+fn run_agent_action(action: cli::AgentAction, colored: bool) -> error::Result<()> {
+    use cli::{AgentAction, AgentTarget};
+    use commands::agent::reporter as agent_cli;
+
+    match action {
+        AgentAction::Install {
+            target,
+            force,
+            check,
+            skill_only,
+            instructions_only,
+        } => match target {
+            AgentTarget::Claude => {
+                agent_cli::install_claude(force, check, skill_only, instructions_only, colored)
+            }
+            AgentTarget::Codex => {
+                agent_cli::install_codex(force, check, skill_only, instructions_only, colored)
+            }
+            AgentTarget::All => {
+                // Run both, aggregate errors.
+                let c =
+                    agent_cli::install_claude(force, check, skill_only, instructions_only, colored);
+                let x =
+                    agent_cli::install_codex(force, check, skill_only, instructions_only, colored);
+                aggregate(c, x)
+            }
+        },
+        AgentAction::Uninstall { target } => match target {
+            AgentTarget::Claude => agent_cli::uninstall_claude(colored),
+            AgentTarget::Codex => agent_cli::uninstall_codex(colored),
+            AgentTarget::All => {
+                let c = agent_cli::uninstall_claude(colored);
+                let x = agent_cli::uninstall_codex(colored);
+                aggregate(c, x)
+            }
+        },
+        AgentAction::Status => {
+            let c = agent_cli::status_claude(colored);
+            let x = agent_cli::status_codex(colored);
+            aggregate(c, x)
+        }
+    }
+}
+
+/// When `--target all`, return the first error if any, else `Ok`. The
+/// individual `install_*` functions print their own reports before
+/// returning, so the user sees both halves' progress even if one fails.
+fn aggregate(a: error::Result<()>, b: error::Result<()>) -> error::Result<()> {
+    match (a, b) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), _) | (_, Err(e)) => Err(e),
+    }
 }
 
 fn should_skip_hook_before_config_load() -> bool {

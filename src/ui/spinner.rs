@@ -1,7 +1,22 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
+
+/// True when stderr is a real terminal that understands ANSI escape codes.
+///
+/// When `false`, the spinner falls back to a silent task that never writes
+/// to stderr. Rationale: in non-TTY contexts (CI logs, Bash pipelines, the
+/// `Bash` tool of coding agents like Claude Code) the ANSI cursor-control
+/// sequences we emit are written as literal characters, so each tick
+/// appends another `⠋` frame instead of overwriting the previous one. A
+/// 30-second LLM call can dump tens of kilobytes of garbage that floods
+/// the agent's view, truncates stdout, and obscures real errors.
+///
+/// We probe stderr (not stdout) because the spinner writes there.
+fn stderr_is_tty() -> bool {
+    io::stderr().is_terminal()
+}
 
 const SPINNER_CHARS: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -98,6 +113,18 @@ impl Spinner {
         prev_width: Arc<AtomicUsize>,
         colored: bool,
     ) -> JoinHandle<()> {
+        // Non-TTY: ANSI cursor controls become literal characters and
+        // spam the log. Silently no-op until cancelled. Real progress
+        // (LLM streamed output, commit creation messages) still reaches
+        // the caller through other channels.
+        if !stderr_is_tty() {
+            return tokio::spawn(async move {
+                while running.load(Ordering::SeqCst) {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            });
+        }
+
         tokio::spawn(async move {
             let mut idx = 0usize;
             let mut stderr = io::stderr();
@@ -176,8 +203,11 @@ impl Spinner {
         }
     }
 
-    /// 清除 spinner 残留（考虑 reflow）
+    /// 清除 spinner 残留（考虑 reflow）。Non-TTY 路径下无需清屏。
     fn clear_output(&self) {
+        if !stderr_is_tty() {
+            return;
+        }
         let mut stderr = io::stderr();
         let term_width = console::Term::stderr().size().1 as usize;
         let old_w = self.prev_width.load(Ordering::SeqCst);
