@@ -118,6 +118,13 @@ impl GitOperations for MockGitOps {
         Ok(vec![])
     }
 
+    fn get_commit_history_full(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<gcop_rs::git::history::HistoricalCommit>> {
+        Ok(vec![])
+    }
+
     fn get_commit_line_stats(&self, _hash: &str) -> Result<(usize, usize)> {
         Ok((0, 0))
     }

@@ -63,7 +63,7 @@ pub async fn run_split_flow(
         vec![options.feedback.join(" ")]
     };
 
-    // JSON mode
+    // JSON mode owns its own history sampling (after its own staged + lockfile gates).
     if options.format.is_json() {
         return handle_split_json_mode(options, config, repo, provider, &initial_feedbacks).await;
     }
@@ -122,6 +122,18 @@ pub async fn run_split_flow(
         // Fall through to generate a single group anyway
     }
 
+    // Sample history AFTER all early-return gates so we don't revwalk on
+    // staged-changes errors or lockfile shortcuts. Honour --provider override.
+    let effective_provider_name = options
+        .provider_override
+        .unwrap_or(&config.llm.default_provider);
+    let historical_examples = crate::llm::history_sampler::gather_reference_messages(
+        repo,
+        &config.commit.history,
+        config.llm.providers.get(effective_provider_name),
+        None,
+    );
+
     let branch_name = repo.get_current_branch()?;
     let custom_prompt = config.commit.custom_prompt.clone();
     let mut feedbacks = initial_feedbacks;
@@ -149,6 +161,7 @@ pub async fn run_split_flow(
             &branch_name,
             &custom_prompt,
             &scope_info,
+            &historical_examples,
             colored,
             attempt,
         )
@@ -222,6 +235,7 @@ async fn generate_groups(
     branch_name: &Option<String>,
     custom_prompt: &Option<String>,
     scope_info: &Option<ScopeInfo>,
+    historical_examples: &[String],
     colored: bool,
     attempt: usize,
 ) -> Result<Vec<CommitGroup>> {
@@ -234,6 +248,7 @@ async fn generate_groups(
         user_feedback: feedbacks.to_vec(),
         convention: config.commit.convention.clone(),
         scope_info: scope_info.clone(),
+        historical_examples: historical_examples.to_vec(),
     };
 
     // Build split prompt (system + user)
@@ -763,6 +778,17 @@ async fn handle_split_json_mode(
     let custom_prompt = config.commit.custom_prompt.clone();
     let scope_info = super::commit::compute_scope_info_pub(&stats.files_changed, config);
 
+    // Sample history AFTER all early-return gates. Honour --provider override.
+    let effective_provider_name = options
+        .provider_override
+        .unwrap_or(&config.llm.default_provider);
+    let historical_examples = crate::llm::history_sampler::gather_reference_messages(
+        repo,
+        &config.commit.history,
+        config.llm.providers.get(effective_provider_name),
+        None,
+    );
+
     match generate_groups(
         provider,
         &prompt_file_diffs,
@@ -773,6 +799,7 @@ async fn handle_split_json_mode(
         &branch_name,
         &custom_prompt,
         &scope_info,
+        &historical_examples,
         false,
         0,
     )

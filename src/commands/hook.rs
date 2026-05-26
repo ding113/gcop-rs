@@ -274,6 +274,17 @@ async fn run_hook_inner(
     // Get current branch name
     let branch_name = repo.get_current_branch()?;
 
+    // Sample historical commit-style references for the hook prompt too.
+    // Honour `--provider` override so the budget matches the LLM that will
+    // actually serve the request.
+    let effective_provider_name = provider_override.unwrap_or(&config.llm.default_provider);
+    let historical_examples = crate::llm::history_sampler::gather_reference_messages(
+        &repo,
+        &config.commit.history,
+        config.llm.providers.get(effective_provider_name),
+        None,
+    );
+
     // Build commit context
     let context = CommitContext {
         files_changed: stats.files_changed,
@@ -284,6 +295,7 @@ async fn run_hook_inner(
         user_feedback: vec![],
         convention: config.commit.convention.clone(),
         scope_info: None, // Hook mode does not currently support workspace scope
+        historical_examples,
     };
 
     // Build prompt

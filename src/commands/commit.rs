@@ -79,7 +79,9 @@ async fn run_with_deps(
         vec![options.feedback.join(" ")]
     };
 
-    // Split mode: separate flow
+    // Split mode: separate flow. Delegates *before* we sample history so
+    // run_split_flow can do its own sampling against its own gate-checks
+    // (avoids the double-revwalk problem of sampling here and there).
     if options.split {
         if options.amend {
             ui::error(&rust_i18n::t!("commit.amend_split_conflict"), colored);
@@ -98,7 +100,9 @@ async fn run_with_deps(
         ));
     }
 
-    // JSON Schema: Standalone Process
+    // JSON Schema: Standalone Process. Owns its own sampling because it has
+    // an independent staged-changes + lockfile gate that we don't want to
+    // double-evaluate here.
     if options.format.is_json() {
         return handle_json_mode(options, config, repo, provider, &initial_feedbacks).await;
     }
@@ -156,6 +160,22 @@ async fn run_with_deps(
     // Workspace scope detection
     let scope_info = compute_scope_info(&stats.files_changed, config);
 
+    // Sample historical commit-style references AFTER all early-return
+    // guards (no-staged-changes, lockfile shortcut) have committed us to an
+    // actual LLM call. Empty on error or feature disabled.
+    //
+    // Uses the *effective* provider config (i.e. honours --provider override)
+    // so the budget matches the LLM that will actually receive the prompt.
+    let effective_provider_name = options
+        .provider_override
+        .unwrap_or(&config.llm.default_provider);
+    let historical_examples = crate::llm::history_sampler::gather_reference_messages(
+        repo,
+        &config.commit.history,
+        config.llm.providers.get(effective_provider_name),
+        None,
+    );
+
     ui::step(
         &rust_i18n::t!("commit.step1"),
         &rust_i18n::t!(
@@ -185,6 +205,7 @@ async fn run_with_deps(
             &branch_name,
             &custom_prompt,
             &scope_info,
+            &historical_examples,
         )
         .await?;
         if !already_displayed {
@@ -222,6 +243,7 @@ async fn run_with_deps(
                     &branch_name,
                     &custom_prompt,
                     &scope_info,
+                    &historical_examples,
                 )
                 .await?
             }
@@ -294,6 +316,18 @@ async fn handle_json_mode(
     let custom_prompt = config.commit.custom_prompt.clone();
     let scope_info = compute_scope_info(&stats.files_changed, config);
 
+    // Sample after the staged-changes + lockfile gates so we don't pay for a
+    // revwalk on the trivial-return paths. Honour --provider override.
+    let effective_provider_name = options
+        .provider_override
+        .unwrap_or(&config.llm.default_provider);
+    let historical_examples = crate::llm::history_sampler::gather_reference_messages(
+        repo,
+        &config.commit.history,
+        config.llm.providers.get(effective_provider_name),
+        None,
+    );
+
     match generate_message_no_streaming(
         provider,
         &diff,
@@ -304,6 +338,7 @@ async fn handle_json_mode(
         &custom_prompt,
         &config.commit.convention,
         &scope_info,
+        &historical_examples,
     )
     .await
     {
@@ -330,6 +365,7 @@ async fn handle_generating(
     branch_name: &Option<String>,
     custom_prompt: &Option<String>,
     scope_info: &Option<ScopeInfo>,
+    historical_examples: &[String],
 ) -> Result<CommitState> {
     // Check retry limit
     let gen_state = CommitState::Generating {
@@ -357,6 +393,7 @@ async fn handle_generating(
         branch_name,
         custom_prompt,
         scope_info,
+        historical_examples,
     )
     .await?;
 
@@ -451,6 +488,7 @@ async fn generate_message(
     branch_name: &Option<String>,
     custom_prompt: &Option<String>,
     scope_info: &Option<ScopeInfo>,
+    historical_examples: &[String],
 ) -> Result<(String, bool)> {
     let context = CommitContext {
         files_changed: stats.files_changed.clone(),
@@ -461,6 +499,7 @@ async fn generate_message(
         user_feedback: feedbacks.to_vec(),
         convention: config.commit.convention.clone(),
         scope_info: scope_info.clone(),
+        historical_examples: historical_examples.to_vec(),
     };
 
     // Build prompt once
@@ -566,6 +605,7 @@ async fn generate_message_no_streaming(
     custom_prompt: &Option<String>,
     convention: &Option<crate::config::CommitConvention>,
     scope_info: &Option<ScopeInfo>,
+    historical_examples: &[String],
 ) -> Result<String> {
     let context = CommitContext {
         files_changed: stats.files_changed.clone(),
@@ -576,6 +616,7 @@ async fn generate_message_no_streaming(
         user_feedback: feedbacks.to_vec(),
         convention: convention.clone(),
         scope_info: scope_info.clone(),
+        historical_examples: historical_examples.to_vec(),
     };
 
     // Build prompt
