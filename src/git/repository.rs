@@ -4,6 +4,7 @@ use std::io::Write;
 
 use crate::config::FileConfig;
 use crate::error::{GcopError, Result};
+use crate::git::history::{HistoricalCommit, split_message};
 use crate::git::{CommitInfo, DiffStats, GitOperations};
 
 /// Default maximum file size (10MB)
@@ -273,6 +274,72 @@ impl GitOperations for GitRepository {
                 author_email,
                 timestamp,
                 message,
+            });
+        }
+
+        Ok(commits)
+    }
+
+    fn get_commit_history_full(&self, limit: usize) -> Result<Vec<HistoricalCommit>> {
+        if self.is_empty()? || limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut revwalk = self.repo.revwalk()?;
+        revwalk.push_head()?;
+        revwalk.set_sorting(Sort::TIME)?;
+
+        let mut commits = Vec::with_capacity(limit.min(64));
+        for oid in revwalk {
+            if commits.len() >= limit {
+                break;
+            }
+            let oid = oid?;
+            let commit = self.repo.find_commit(oid)?;
+
+            let hash = oid.to_string();
+            let parent_count = commit.parent_count();
+            let author = commit.author();
+            let author_name = author.name().unwrap_or("Unknown").to_string();
+            let author_email = author.email().unwrap_or("").to_string();
+
+            let git_time = commit.time();
+            let timestamp: DateTime<Local> = Local
+                .timestamp_opt(git_time.seconds(), 0)
+                .single()
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        "Invalid git timestamp {} for commit {}; using epoch",
+                        git_time.seconds(),
+                        commit.id()
+                    );
+                    // Use Unix epoch instead of Local::now() so a corrupt
+                    // timestamp can't inflate the commit's recency score
+                    // (the sampler treats "now" as best-recency, which
+                    // would let a single bad commit dominate sampling).
+                    Local
+                        .timestamp_opt(0, 0)
+                        .single()
+                        .unwrap_or_else(Local::now)
+                });
+
+            // Prefer the UTF-8 form; fall back to lossy decoding of the raw
+            // bytes when the message isn't valid UTF-8 (legacy Shift-JIS /
+            // GBK / Latin-1 repos).
+            let raw_message = match commit.message() {
+                Ok(m) => m.to_string(),
+                Err(_) => String::from_utf8_lossy(commit.message_bytes()).into_owned(),
+            };
+            let (subject, body) = split_message(&raw_message);
+
+            commits.push(HistoricalCommit {
+                hash,
+                parent_count,
+                author_name,
+                author_email,
+                timestamp,
+                subject,
+                body,
             });
         }
 

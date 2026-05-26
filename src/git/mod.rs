@@ -7,6 +7,8 @@
 pub mod commit;
 /// Diff parsing and per-file statistics helpers.
 pub mod diff;
+/// Richer historical commit metadata for prompt injection.
+pub mod history;
 /// `git2`-backed repository implementation of [`GitOperations`].
 pub mod repository;
 
@@ -238,6 +240,23 @@ pub trait GitOperations {
     /// - Only includes history reachable from the current branch HEAD.
     /// - Empty repositories return an empty list.
     fn get_commit_history(&self) -> Result<Vec<CommitInfo>>;
+
+    /// Returns up to `limit` historical commits with full message bodies.
+    ///
+    /// Unlike [`get_commit_history`], this method materializes both subject
+    /// and body for each commit. Used by
+    /// [`crate::llm::history_sampler::gather_reference_messages`] for prompt
+    /// style references; the limit caps revwalk cost on large repos.
+    ///
+    /// # Parameters
+    /// - `limit`: maximum number of commits to return (must be > 0 to be useful)
+    ///
+    /// # Returns
+    /// - `Ok(history)` - up to `limit` commits (newest first)
+    /// - `Err(_)` - git operation failed
+    ///
+    /// [`get_commit_history`]: GitOperations::get_commit_history
+    fn get_commit_history_full(&self, limit: usize) -> Result<Vec<history::HistoricalCommit>>;
 
     /// Returns line-level diff statistics for a single commit.
     ///
