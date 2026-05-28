@@ -395,6 +395,8 @@ git.invalid_timestamp_warning: "Warning: Invalid timestamp %{timestamp} in commi
 
 # Streaming UI
 stream.error: "Stream error: %{error}"
+stream.retry_suffix: "(stream retrying)"
+stream.truncated: "stream ended without a Done or Error signal"
 
 # Provider messages
 provider.retrying_suffix: "(Retrying %{attempt}/%{max})"

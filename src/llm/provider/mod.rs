@@ -92,7 +92,13 @@ pub fn create_single_provider(
         GcopError::Config(rust_i18n::t!("provider.provider_not_found", name = name).to_string())
     })?;
 
-    create_provider_from_config(provider_config, name, &config.network, colored)
+    create_provider_from_config(
+        provider_config,
+        name,
+        &config.network,
+        colored,
+        config.llm.stream_transport,
+    )
 }
 
 /// Create specific Provider implementation based on configuration
@@ -101,6 +107,7 @@ fn create_provider_from_config(
     name: &str,
     network_config: &NetworkConfig,
     colored: bool,
+    stream_transport: bool,
 ) -> Result<Arc<dyn LLMProvider>> {
     // Decide which API style to use
     // Prefer using api_style field, otherwise infer from provider name (backward compatibility)
@@ -121,23 +128,43 @@ fn create_provider_from_config(
     // Create corresponding Provider implementation according to API style (exhaustive matching)
     match api_style {
         ApiStyle::Claude => {
-            let provider =
-                backends::ClaudeProvider::new(provider_config, name, network_config, colored)?;
+            let provider = backends::ClaudeProvider::new(
+                provider_config,
+                name,
+                network_config,
+                colored,
+                stream_transport,
+            )?;
             Ok(Arc::new(provider))
         }
         ApiStyle::OpenAI | ApiStyle::OpenAIResponse => {
-            let provider =
-                backends::OpenAIProvider::new(provider_config, name, network_config, colored)?;
+            let provider = backends::OpenAIProvider::new(
+                provider_config,
+                name,
+                network_config,
+                colored,
+                stream_transport,
+            )?;
             Ok(Arc::new(provider))
         }
         ApiStyle::Ollama => {
-            let provider =
-                backends::OllamaProvider::new(provider_config, name, network_config, colored)?;
+            let provider = backends::OllamaProvider::new(
+                provider_config,
+                name,
+                network_config,
+                colored,
+                stream_transport,
+            )?;
             Ok(Arc::new(provider))
         }
         ApiStyle::Gemini => {
-            let provider =
-                backends::GeminiProvider::new(provider_config, name, network_config, colored)?;
+            let provider = backends::GeminiProvider::new(
+                provider_config,
+                name,
+                network_config,
+                colored,
+                stream_transport,
+            )?;
             Ok(Arc::new(provider))
         }
     }
