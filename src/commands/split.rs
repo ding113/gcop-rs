@@ -286,7 +286,10 @@ async fn generate_groups(
         }
     }
 
-    // Use non-streaming mode (we need complete JSON)
+    // Split mode wants the full JSON response intact; the UI does not stream
+    // deltas (the response is parsed as JSON). HTTP transport still streams
+    // via SSE when supported, so slow models do not trip CDN first-byte
+    // timeouts.
     let step_msg = if attempt == 0 {
         rust_i18n::t!("spinner.generating")
     } else {
@@ -298,8 +301,15 @@ async fn generate_groups(
     let mut spinner = ui::Spinner::new_with_cancel_hint(&spinner_msg, colored);
     spinner.start_time_display();
 
-    // Direct query with pre-built prompts
-    let raw_response = provider.send_prompt(&system, &user, Some(&spinner)).await?;
+    // Direct query with pre-built prompts. `supports_streaming()` already
+    // accounts for the user-facing `[llm].stream_transport` opt-out.
+    let raw_response = if provider.supports_streaming() {
+        provider
+            .send_prompt_collect(&system, &user, Some(&spinner))
+            .await?
+    } else {
+        provider.send_prompt(&system, &user, Some(&spinner)).await?
+    };
 
     spinner.finish_and_clear();
 

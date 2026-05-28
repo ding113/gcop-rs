@@ -296,7 +296,9 @@ impl LLMProvider for FallbackProvider {
             ctx.custom_prompt.as_deref(),
             ctx.convention.as_ref(),
         );
-        let message = self.send_prompt(&system, &user, progress).await?;
+        // Always route through send_prompt_collect: providers that don't
+        // support streaming fall through to send_prompt internally.
+        let message = self.send_prompt_collect(&system, &user, progress).await?;
         Ok(process_commit_response_with_options(message, false))
     }
 

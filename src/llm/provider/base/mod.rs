@@ -131,7 +131,10 @@ impl<T: ApiBackend> LLMProvider for T {
             system.len(),
             user.len()
         );
-        let response = self.call_api(&system, &user, progress).await?;
+        // Route through send_prompt_collect so review_code shares the same
+        // first-byte-timeout protection as commit generation. Providers
+        // that don't support streaming fall through to call_api internally.
+        let response = LLMProvider::send_prompt_collect(self, &system, &user, progress).await?;
         process_review_response_with_options(&response, self.strip_thinking())
     }
 
