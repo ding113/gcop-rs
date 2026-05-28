@@ -660,6 +660,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::error::GcopError;
+    use crate::llm::LLMProvider;
     use crate::llm::StreamChunk;
     use crate::llm::provider::test_utils::{
         ensure_crypto_provider, test_network_config_no_retry, test_provider_config,
@@ -1052,5 +1053,130 @@ mod tests {
         assert_next_delta(&mut handle.receiver, "Hi").await;
         assert_next_done(&mut handle.receiver).await;
         mock.assert_async().await;
+    }
+
+    // ============================================================
+    // send_prompt_collect: HTTP transport always streams (stream:true)
+    // and the result is the concatenated SSE delta payload.
+    // ============================================================
+
+    /// ChatCompletions mode: body has `stream:true`, deltas are concatenated.
+    #[tokio::test]
+    async fn test_openai_chat_send_prompt_collect_streams_and_accumulates() {
+        ensure_crypto_provider();
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/chat/completions")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "stream": true,
+            })))
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\
+                 data: {\"choices\":[{\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n\
+                 data: [DONE]\n",
+            )
+            .create_async()
+            .await;
+
+        let provider = OpenAIProvider::new(
+            &test_provider_config(
+                server.url(),
+                Some("sk-test".to_string()),
+                "gpt-4o-mini".to_string(),
+            ),
+            "openai",
+            &test_network_config_no_retry(),
+            false,
+        )
+        .unwrap();
+
+        let result = provider
+            .send_prompt_collect("system", "hi", None)
+            .await
+            .unwrap();
+        assert_eq!(result, "Hello world");
+        mock.assert_async().await;
+    }
+
+    /// Responses mode: body has `stream:true`, response.output_text.delta
+    /// payloads are concatenated.
+    #[tokio::test]
+    async fn test_openai_responses_send_prompt_collect_streams_and_accumulates() {
+        ensure_crypto_provider();
+        let mut server = Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/responses")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "stream": true,
+            })))
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\",\"sequence_number\":1}\n\
+                 data: {\"type\":\"response.output_text.delta\",\"delta\":\" world\",\"sequence_number\":2}\n\
+                 data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"},\"sequence_number\":3}\n",
+            )
+            .create_async()
+            .await;
+
+        let provider = OpenAIProvider::new(
+            &responses_provider_config(server.url()),
+            "openai",
+            &test_network_config_no_retry(),
+            false,
+        )
+        .unwrap();
+
+        let result = provider
+            .send_prompt_collect("system", "hi", None)
+            .await
+            .unwrap();
+        assert_eq!(result, "Hello world");
+        mock.assert_async().await;
+    }
+
+    /// Regression: legacy `send_prompt` (ChatCompletions) must NOT carry
+    /// `stream:true`. Achieved by registering a streaming-only mock with
+    /// `expect(0)` plus a permissive fallback for the actual non-streaming
+    /// call.
+    #[tokio::test]
+    async fn test_openai_chat_send_prompt_body_has_no_stream_field() {
+        ensure_crypto_provider();
+        let mut server = Server::new_async().await;
+        let stream_mock = server
+            .mock("POST", "/v1/chat/completions")
+            .match_body(mockito::Matcher::PartialJson(
+                serde_json::json!({"stream": true}),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#)
+            .expect(0)
+            .create_async()
+            .await;
+        let _fallback = server
+            .mock("POST", "/v1/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#)
+            .create_async()
+            .await;
+
+        let provider = OpenAIProvider::new(
+            &test_provider_config(
+                server.url(),
+                Some("sk-test".to_string()),
+                "gpt-4o-mini".to_string(),
+            ),
+            "openai",
+            &test_network_config_no_retry(),
+            false,
+        )
+        .unwrap();
+
+        let _ = provider.send_prompt("system", "hi", None).await.unwrap();
+        stream_mock.assert_async().await; // expect(0) verified
     }
 }

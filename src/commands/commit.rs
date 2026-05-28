@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::sync::Arc;
 
 use colored::Colorize;
@@ -194,6 +195,12 @@ async fn run_with_deps(
     if options.dry_run {
         let branch_name = repo.get_current_branch()?;
         let custom_prompt = config.commit.custom_prompt.clone();
+        let live_render = should_live_render(
+            config.ui.streaming,
+            provider.supports_streaming(),
+            options.yes,
+            std::io::stderr().is_terminal(),
+        );
         let (message, already_displayed) = generate_message(
             provider,
             &diff,
@@ -206,6 +213,7 @@ async fn run_with_deps(
             &custom_prompt,
             &scope_info,
             &historical_examples,
+            live_render,
         )
         .await?;
         if !already_displayed {
@@ -339,6 +347,7 @@ async fn handle_json_mode(
         &config.commit.convention,
         &scope_info,
         &historical_examples,
+        config.llm.stream_transport,
     )
     .await
     {
@@ -381,6 +390,18 @@ async fn handle_generating(
         return gen_state.handle_generation(GenerationResult::MaxRetriesExceeded, options.yes);
     }
 
+    // Live-render decision is fully derived here so generate_message stays
+    // a pure executor of the choice. By the time we reach this function the
+    // state machine has already excluded --json and --split, so the only
+    // remaining gates are config.ui.streaming, provider capability,
+    // --yes, and the actual TTY state of stderr.
+    let live_render = should_live_render(
+        config.ui.streaming,
+        provider.supports_streaming(),
+        options.yes,
+        std::io::stderr().is_terminal(),
+    );
+
     // Generate message.
     let (message, already_displayed) = generate_message(
         provider,
@@ -394,6 +415,7 @@ async fn handle_generating(
         custom_prompt,
         scope_info,
         historical_examples,
+        live_render,
     )
     .await?;
 
@@ -473,6 +495,27 @@ fn handle_waiting_for_action(
     Ok(waiting_state.handle_action(user_action))
 }
 
+/// Pure predicate: should the commit flow live-render LLM deltas to the
+/// terminal (typewriter effect) versus silently buffer them behind a spinner?
+///
+/// This decision is **independent** of HTTP transport — that is decided
+/// per call site by `LLMConfig::stream_transport` + `supports_streaming()`.
+/// The live-render path uses `StreamingOutput::process`, which `print!`s
+/// deltas with ANSI control sequences; in non-interactive shells those
+/// sequences become visual noise (CI logs, the Claude Code Bash tool, etc.).
+///
+/// All inputs are taken as plain values so the function is trivially
+/// unit-testable without constructing real `AppConfig`/`Provider`/`stdio`
+/// instances.
+fn should_live_render(
+    ui_streaming: bool,
+    provider_supports_streaming: bool,
+    yes: bool,
+    is_terminal: bool,
+) -> bool {
+    ui_streaming && provider_supports_streaming && !yes && is_terminal
+}
+
 /// Generates a commit message.
 ///
 /// Returns `(message, already_displayed)`.
@@ -489,6 +532,7 @@ async fn generate_message(
     custom_prompt: &Option<String>,
     scope_info: &Option<ScopeInfo>,
     historical_examples: &[String],
+    live_render: bool,
 ) -> Result<(String, bool)> {
     let context = CommitContext {
         files_changed: stats.files_changed.clone(),
@@ -515,11 +559,9 @@ async fn generate_message(
         print_verbose_prompt(&system, &user, false, true);
     }
 
-    // Decide whether to use streaming mode.
-    let use_streaming = config.ui.streaming && provider.supports_streaming();
     let colored = config.ui.colored;
 
-    if use_streaming {
+    if live_render {
         // Streaming mode: print header, then stream response chunks.
         let step_msg = if attempt == 0 {
             rust_i18n::t!("spinner.generating_streaming")
@@ -540,7 +582,10 @@ async fn generate_message(
 
         Ok((message, true)) // Already shown
     } else {
-        // Non-streaming mode: use spinner with cancel hint and elapsed time.
+        // Non-streaming UI mode: use spinner with cancel hint and elapsed time.
+        // HTTP transport still streams when `config.llm.stream_transport` is on
+        // and the provider supports SSE — this is what protects long-running
+        // LLM calls from CDN first-byte timeouts (e.g. Cloudflare 524).
         let spinner_message = if attempt == 0 {
             rust_i18n::t!("spinner.generating").to_string()
         } else {
@@ -549,7 +594,13 @@ async fn generate_message(
         let mut spinner = ui::Spinner::new_with_cancel_hint(&spinner_message, colored);
         spinner.start_time_display();
 
-        let message = provider.send_prompt(&system, &user, Some(&spinner)).await?;
+        let message = if config.llm.stream_transport && provider.supports_streaming() {
+            provider
+                .send_prompt_collect(&system, &user, Some(&spinner))
+                .await?
+        } else {
+            provider.send_prompt(&system, &user, Some(&spinner)).await?
+        };
 
         spinner.finish_and_clear();
         let message = process_commit_response_with_options(message, provider.strip_thinking());
@@ -593,7 +644,12 @@ fn display_edited_message(message: &str, colored: bool) {
     }
 }
 
-/// Generate commit message (non-streaming version, for JSON output mode)
+/// Generate commit message for JSON output mode.
+///
+/// The function name preserves history but the HTTP transport is now SSE
+/// when `stream_transport` is on and the provider supports streaming —
+/// only the UI never renders deltas (the response is buffered into a
+/// single `String` and returned to the caller intact for JSON output).
 #[allow(clippy::too_many_arguments)]
 async fn generate_message_no_streaming(
     provider: &Arc<dyn LLMProvider>,
@@ -606,6 +662,7 @@ async fn generate_message_no_streaming(
     convention: &Option<crate::config::CommitConvention>,
     scope_info: &Option<ScopeInfo>,
     historical_examples: &[String],
+    stream_transport: bool,
 ) -> Result<String> {
     let context = CommitContext {
         files_changed: stats.files_changed.clone(),
@@ -633,8 +690,12 @@ async fn generate_message_no_streaming(
         print_verbose_prompt(&system, &user, true, false);
     }
 
-    // Use the non-streaming API directly and apply the same cleanup as UI mode.
-    let message = provider.send_prompt(&system, &user, None).await?;
+    // HTTP transport: stream via SSE when supported (decoupled from UI).
+    let message = if stream_transport && provider.supports_streaming() {
+        provider.send_prompt_collect(&system, &user, None).await?
+    } else {
+        provider.send_prompt(&system, &user, None).await?
+    };
     Ok(process_commit_response_with_options(
         message,
         provider.strip_thinking(),
@@ -827,5 +888,205 @@ mod tests {
     fn test_format_edited_header() {
         let header = format_edited_header();
         assert_eq!(header, "Updated commit message:");
+    }
+
+    // === should_live_render predicate ========================================
+
+    #[test]
+    fn test_live_render_in_interactive_default() {
+        // ui.streaming=true, supports_streaming=true, yes=false, tty=true → live render
+        assert!(should_live_render(true, true, false, true));
+    }
+
+    #[test]
+    fn test_live_render_blocked_by_yes() {
+        // -y suppresses live render even on interactive terminal
+        assert!(!should_live_render(true, true, true, true));
+    }
+
+    #[test]
+    fn test_live_render_blocked_by_non_tty() {
+        // stderr is not a terminal (CI logs, Bash tool, pipe) → silent buffering
+        assert!(!should_live_render(true, true, false, false));
+    }
+
+    #[test]
+    fn test_live_render_blocked_by_ui_streaming_false() {
+        // User opted out via config.ui.streaming=false
+        assert!(!should_live_render(false, true, false, true));
+    }
+
+    #[test]
+    fn test_live_render_blocked_by_provider_no_support() {
+        // Ollama-style backend without SSE support
+        assert!(!should_live_render(true, false, false, true));
+    }
+
+    #[test]
+    fn test_live_render_blocked_when_all_off() {
+        assert!(!should_live_render(false, false, true, false));
+    }
+
+    #[test]
+    fn test_live_render_requires_all_four_signals() {
+        // Any single false gate suppresses live render — exhaustive check.
+        let combos = [
+            (false, true, false, true),
+            (true, false, false, true),
+            (true, true, true, true),
+            (true, true, false, false),
+        ];
+        for (s, p, y, t) in combos {
+            assert!(
+                !should_live_render(s, p, y, t),
+                "should_live_render({}, {}, {}, {}) should be false but was true",
+                s,
+                p,
+                y,
+                t
+            );
+        }
+        assert!(should_live_render(true, true, false, true));
+    }
+
+    // === End-to-end HTTP transport assertion =================================
+    //
+    // The original user bug: `gcop-rs commit -y --json` (non-TTY) was sending
+    // HTTP requests with `stream: null/absent`, causing CDN first-byte timeouts
+    // (Cloudflare 524). After the fix, `generate_message_no_streaming` (the
+    // function backing `handle_json_mode` and the JSON-output path) must route
+    // through the SSE transport when `stream_transport=true`, even though it
+    // collects the full string before returning.
+
+    /// JSON-mode path with `stream_transport = true` must use SSE transport.
+    #[tokio::test]
+    async fn test_generate_message_no_streaming_uses_sse_when_stream_transport_on() {
+        use std::sync::Arc;
+
+        use crate::git::DiffStats;
+        use crate::llm::LLMProvider;
+        use crate::llm::provider::backends::claude::ClaudeProvider;
+        use crate::llm::provider::test_utils::ensure_crypto_provider;
+
+        ensure_crypto_provider();
+        let mut server = mockito::Server::new_async().await;
+        // Demands stream:true in body; if generate_message_no_streaming
+        // routes through send_prompt (the old path), this mock will not match
+        // and the request will fail. SSE body is returned on success.
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+                "stream": true,
+            })))
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(concat!(
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"feat: ship\"}}\n\n",
+                "data: {\"type\":\"message_stop\"}\n\n",
+            ))
+            .create_async()
+            .await;
+
+        let provider_cfg = crate::llm::provider::test_utils::test_provider_config(
+            server.url(),
+            Some("sk-ant-test".into()),
+            "claude-3-haiku-20240307".into(),
+        );
+        let net_cfg = crate::llm::provider::test_utils::test_network_config_no_retry();
+        let provider: Arc<dyn LLMProvider> =
+            Arc::new(ClaudeProvider::new(&provider_cfg, "claude", &net_cfg, false).unwrap());
+
+        let stats = DiffStats {
+            files_changed: vec!["a.rs".into()],
+            insertions: 1,
+            deletions: 0,
+        };
+
+        let result = generate_message_no_streaming(
+            &provider,
+            "diff --git a/a.rs b/a.rs\n+1 line",
+            &stats,
+            &[],
+            false,
+            &None,
+            &None,
+            &None,
+            &None,
+            &[],
+            true, // stream_transport ON
+        )
+        .await
+        .expect("generate_message_no_streaming should succeed");
+        assert_eq!(result, "feat: ship");
+        mock.assert_async().await;
+    }
+
+    /// Escape hatch: `stream_transport = false` must restore the legacy
+    /// non-streaming HTTP body (no `stream:true`). Mirrors the regression
+    /// guard in backend tests.
+    #[tokio::test]
+    async fn test_generate_message_no_streaming_falls_back_when_stream_transport_off() {
+        use std::sync::Arc;
+
+        use crate::git::DiffStats;
+        use crate::llm::LLMProvider;
+        use crate::llm::provider::backends::claude::ClaudeProvider;
+        use crate::llm::provider::test_utils::ensure_crypto_provider;
+
+        ensure_crypto_provider();
+        let mut server = mockito::Server::new_async().await;
+        // Streaming-only mock — must NOT match when stream_transport=false.
+        let stream_mock = server
+            .mock("POST", "/v1/messages")
+            .match_body(mockito::Matcher::PartialJson(
+                serde_json::json!({"stream": true}),
+            ))
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body("data: {\"type\":\"message_stop\"}\n\n")
+            .expect(0)
+            .create_async()
+            .await;
+        // Permissive fallback for the legacy synchronous POST.
+        let _fallback = server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"content":[{"type":"text","text":"feat: ship"}]}"#)
+            .create_async()
+            .await;
+
+        let provider_cfg = crate::llm::provider::test_utils::test_provider_config(
+            server.url(),
+            Some("sk-ant-test".into()),
+            "claude-3-haiku-20240307".into(),
+        );
+        let net_cfg = crate::llm::provider::test_utils::test_network_config_no_retry();
+        let provider: Arc<dyn LLMProvider> =
+            Arc::new(ClaudeProvider::new(&provider_cfg, "claude", &net_cfg, false).unwrap());
+
+        let stats = DiffStats {
+            files_changed: vec!["a.rs".into()],
+            insertions: 1,
+            deletions: 0,
+        };
+
+        let result = generate_message_no_streaming(
+            &provider,
+            "diff",
+            &stats,
+            &[],
+            false,
+            &None,
+            &None,
+            &None,
+            &None,
+            &[],
+            false, // stream_transport OFF
+        )
+        .await
+        .expect("should succeed via legacy path");
+        assert_eq!(result, "feat: ship");
+        stream_mock.assert_async().await; // expect(0) verified
     }
 }

@@ -395,6 +395,8 @@ git.invalid_timestamp_warning: "警告：提交 %{commit} 的时间戳 %{timesta
 
 # 流式 UI
 stream.error: "流式输出错误：%{error}"
+stream.retry_suffix: "（流重试中）"
+stream.truncated: "流意外终止，未收到 Done/Error 标记"
 
 # Provider 消息
 provider.retrying_suffix: "（重试 %{attempt}/%{max}）"
