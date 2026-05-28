@@ -42,7 +42,7 @@ fn test_convention_conventional_e2e() {
         build_commit_prompt_split(diff, &context, None, context.convention.as_ref());
 
     // system prompt 应包含默认规则 + convention 约束
-    assert!(system.contains("git commit message generator"));
+    assert!(system.contains("expert software engineer"));
     assert!(system.contains("## Convention:"));
     assert!(system.contains("conventional commits format"));
     assert!(system.contains("Allowed types: feat, fix, docs, refactor"));

@@ -81,8 +81,8 @@ index 1234567..abcdefg 100644
     let (system, user) = build_commit_prompt_split(diff, &context, None, None);
 
     // 验证 system prompt 包含角色和规则
-    assert!(system.contains("git commit message generator"));
-    assert!(system.contains("conventional commits"));
+    assert!(system.contains("expert software engineer"));
+    assert!(system.contains("Conventional Commits"));
 
     // 验证 user message 包含所有必要信息
     assert!(user.contains("diff --git"));

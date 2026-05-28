@@ -1,14 +1,19 @@
 use crate::config::{CommitConvention, ConventionStyle};
 use crate::llm::{CommitContext, ReviewType, ScopeInfo};
 
-/// Static system directives (cacheable) - for use in system/user split mode
-const COMMIT_SYSTEM_PROMPT: &str = r#"You are a git commit message generator.
-
-Rules:
-- Use conventional commits: type(scope): description
-- First line max 72 chars
-- Common types: feat, fix, docs, style, refactor, test, chore
-- Output ONLY the commit message, no explanation"#;
+/// Built-in commit-message system prompt.
+///
+/// Loaded at compile time from `prompts/commit_system.txt` so the prompt
+/// content stays editable as a plain text file — no Rust raw-string
+/// escaping concerns, no IDE syntax-highlight confusion, and the prompt
+/// can be reviewed in diff form like any other text asset.
+///
+/// Users fully REPLACE this default by setting `[commit].custom_prompt`
+/// in `~/.config/gcop/config.toml` (or any project-level
+/// `.gcop/config.toml`); when that field is `None`, this builtin is used.
+/// The optional `[commit.convention].extra_prompt` is always appended on
+/// top, regardless of which system prompt is active.
+const COMMIT_SYSTEM_PROMPT: &str = include_str!("prompts/commit_system.txt");
 
 /// Review basic system commands (can be overridden by customization)
 const REVIEW_SYSTEM_PROMPT_BASE: &str = r#"You are an expert code reviewer.
@@ -337,9 +342,9 @@ mod tests {
         let ctx = create_context(vec!["foo.rs"], 10, 5, None, vec![]);
         let (system, user) = build_commit_prompt_split("diff content", &ctx, None, None);
 
-        // system should contain role definitions and rules
-        assert!(system.contains("git commit message generator"));
-        assert!(system.contains("conventional commits"));
+        // system should contain the builtin role + format references
+        assert!(system.contains("expert software engineer"));
+        assert!(system.contains("Conventional Commits"));
 
         // user should contain diff and context
         assert!(user.contains("diff content"));
@@ -447,7 +452,7 @@ mod tests {
         let (system, _) = build_split_commit_prompt(&diffs, &ctx, Some("Use Japanese"), None);
 
         // Base commit rules must be present
-        assert!(system.contains("conventional commits"));
+        assert!(system.contains("Conventional Commits"));
         // Split grouping rules must be present
         assert!(system.contains("groups"));
         assert!(system.contains("JSON"));
