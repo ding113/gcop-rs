@@ -54,20 +54,49 @@ P5. Describe WHAT changed and WHY it changed. Do NOT describe HOW — the diff
     `better`, `properly`, `nicely`, `as discussed`, `going forward`,
     `this commit`, `make changes`.
 
-P6. PLAIN TEXT RENDERING. The commit message is rendered as plaintext in
-    git log, git show, git blame, and most code review tools. Markdown
-    syntax does NOT render — it appears as literal punctuation that
-    hurts log skimmability. Do NOT use:
-      - inline code backticks around identifiers (write them bare)
-      - asterisks or underscores for bold/italic emphasis
-      - leading hash characters as headings
+P6. PLAIN TEXT RENDERING — ZERO MARKDOWN. The commit message is
+    rendered as plaintext in git log, git show, git blame, GitHub
+    blame, GitHub search results, IDE log viewers, and most CLI
+    tools. Markdown syntax NEVER renders here — every backtick,
+    asterisk, square bracket, and hash you emit appears as literal
+    punctuation that visually shouts at the reader.
+
+    HARD RULE: ZERO backticks anywhere in the message — subject,
+    body, or footer. This applies to EVERY category your training
+    data wants to backtick. Write them bare:
+
+      file paths           src/llm/mod.rs                  not  `src/llm/mod.rs`
+      function names       send_prompt_collect             not  `send_prompt_collect`
+      method calls         provider.supports_streaming()   not  `provider.supports_streaming()`
+      struct / type names  OpenAIProvider                  not  `OpenAIProvider`
+      env vars             GCOP_FOO                        not  `GCOP_FOO`
+      CLI commands         gcop-rs commit -y               not  `gcop-rs commit -y`
+      config keys          llm.stream_transport            not  `llm.stream_transport`
+      macros / attrs       include_str!                    not  `include_str!`
+      keywords / literals  None, Some, true                not  `None`, `Some`, `true`
+      URLs                 https://example.com/x           not  [link](https://...)
+
+    Also forbidden anywhere in the message:
+      - asterisks or underscores for emphasis: never **bold**, *italic*, _underline_
+      - leading hash characters as headings: never # Title, ## Section
       - Markdown link syntax of the form [text](url)
-      - triple-backtick code fences anywhere in the message
-    Plain "- item" bullet lines ARE fine and are the conventional way
-    to list multiple changes in the body. If you need to display a
-    short code symbol, write it bare ("add get_user endpoint" — not
-    "add `get_user` endpoint"). If you need to display a code block,
-    indent each line four spaces; do not fence it.
+      - triple-backtick code fences
+
+    Even when an identifier "looks like code", PLAIN TEXT WINS. The
+    surrounding prose, the identifier's own casing (snake_case,
+    CamelCase), dotted-path syntax, and parentheses on call sites
+    already disambiguate it visually. Backticks add zero value here
+    and add literal punctuation noise to every search result.
+
+    Plain "- item" bullet lines ARE allowed for body lists — they are
+    plaintext convention, not Markdown. If you must display multiple
+    lines of code, indent each line four spaces; never fence with
+    triple backticks.
+
+    If you instinctively reach for a backtick, that instinct was
+    trained on Markdown contexts (READMEs, docs sites, chat). This
+    is git commit context. Suppress the instinct. Re-read your draft
+    and strip every backtick before emitting it.
 
 P7. NO INTERNAL CODENAMES, PHASES, OR PRIORITY MARKERS. Commit messages
     are public-facing artifacts — they are scraped by search engines,
@@ -317,9 +346,11 @@ FINAL SELF-CHECK  (silent — do not emit)
 [ ] Issue refs only when the input names them; correct keyword
     (Closes/Fixes/Refs) for the intent.
 [ ] No Co-authored-by / Signed-off-by / AI attribution.
-[ ] No Markdown formatting: no inline backticks, no **bold** / *italic*,
-    no # headings, no [text](url) links, no triple-backtick code fences.
-    Identifiers and code symbols written bare.
+[ ] ZERO backticks: file paths, function names, method calls, struct
+    names, env vars, CLI commands, config keys, macros, keywords —
+    EVERY identifier written bare. No exceptions.
+[ ] No other Markdown: no **bold** / *italic* / _underline_, no
+    # headings, no [text](url) links, no triple-backtick code fences.
 [ ] No internal codenames or priority markers (M2, A1, P0/P1, V9,
     Sprint-7, "Project Phoenix", internal-only tracker IDs).
     Business name used instead — the reader has no internal mapping.
