@@ -313,8 +313,15 @@ async fn generate_groups(
 
     spinner.finish_and_clear();
 
-    // Parse the response
-    parse_split_response(&raw_response, &stats.files_changed)
+    // Parse the response. Thread the provider's thinking-tag policy so the
+    // plain-text fallback normalises reasoning models' output the same way the
+    // single-commit path does. Both the interactive/-y outer loop and
+    // handle_split_json_mode reach this chokepoint.
+    parse_split_response_with_options(
+        &raw_response,
+        &stats.files_changed,
+        provider.strip_thinking(),
+    )
 }
 
 // --- Response parsing --------------------------------------------------------
@@ -323,19 +330,82 @@ async fn generate_groups(
 ///
 /// Strips markdown code fences if present, then parses JSON.
 /// Validates that every staged file appears exactly once.
+///
+/// Thin wrapper over [`parse_split_response_with_options`] with
+/// `strip_thinking = true` (the safe default; thinking-tag stripping is
+/// idempotent on already-clean text). Kept as the public 2-arg signature so
+/// existing call sites and tests are unaffected.
 pub fn parse_split_response(raw: &str, expected_files: &[String]) -> Result<Vec<CommitGroup>> {
-    // Strip markdown code fences
-    let json_str = strip_code_fences(raw);
+    parse_split_response_with_options(raw, expected_files, true)
+}
 
-    // Parse JSON
-    let mut response: SplitResponse = serde_json::from_str(json_str).map_err(|e| {
-        // Truncate preview at char boundary to avoid panic on multi-byte UTF-8
-        let preview: String = raw.chars().take(200).collect();
-        GcopError::SplitParseFailed(format!(
-            "JSON parse error: {}. Response preview: {}",
-            e, preview
-        ))
-    })?;
+/// Parse the LLM response into commit groups, honouring the provider's
+/// thinking-tag policy for the plain-text fallback path.
+///
+/// Resolution order when the strict parse fails (requirement: split mode must
+/// degrade gracefully instead of hard-failing whenever it safely can):
+///
+/// 1. Strict parse of the (fence-stripped, BOM-stripped) whole string.
+/// 2. RECOVER embedded JSON: if the response wraps a valid `groups` object in
+///    a prose preamble, markdown decoration, or an unterminated code fence,
+///    slice the outermost `{ … }` span and re-parse it — preserving the
+///    model's real atomic grouping.
+/// 3. PLAIN-TEXT fallback: if the response is a usable single commit message
+///    (and shows NO JSON-attempt signal), treat it as the model collapsing
+///    ALL staged changes into ONE atomic commit and synthesise a single group
+///    covering every expected file. Mirrors non-split (Base) behaviour.
+/// 4. Otherwise preserve the original parse error.
+///
+/// Crucially, malformed/truncated/structured JSON is NEVER committed verbatim
+/// as a message — a structural check (see [`looks_like_json_attempt`],
+/// independent of quoting style, key names, and prose/markdown/fence
+/// decoration) makes such input error so the caller can retry, exactly as the
+/// requirement demands.
+pub(crate) fn parse_split_response_with_options(
+    raw: &str,
+    expected_files: &[String],
+    strip_thinking: bool,
+) -> Result<Vec<CommitGroup>> {
+    // Strip a whole-string markdown fence, then a leading BOM / zero-width
+    // prefix so an otherwise-valid JSON body still parses and the broken-JSON
+    // guards see the true leading character.
+    let json_str = strip_invisible_prefix(strip_code_fences(raw));
+
+    // Parse JSON; on failure try embedded-JSON recovery, then a single-group
+    // plain-text fallback.
+    let mut response: SplitResponse = match serde_json::from_str(json_str) {
+        Ok(resp) => resp,
+        Err(e) => {
+            // (1) Recover a valid groups object wrapped in prose/markdown/an
+            //     unterminated fence — but ONLY when it covers every staged
+            //     file. A subset-covering recovery would silently leave the
+            //     omitted files uncommitted (the missing-files branch below is
+            //     warn-only), so we decline it and fall through to error.
+            if let Some(recovered) = recover_embedded_split_response(json_str)
+                && covers_all_expected(&recovered, expected_files)
+            {
+                tracing::warn!(
+                    "split: recovered a JSON groups object embedded in a non-JSON wrapper"
+                );
+                recovered
+            } else if let Some(groups) =
+                try_single_group_fallback(json_str, expected_files, strip_thinking)
+            {
+                tracing::warn!(
+                    "split: LLM returned non-JSON; treating the whole response as a single \
+                     atomic commit covering all staged files"
+                );
+                SplitResponse { groups }
+            } else {
+                // Truncate preview at char boundary to avoid panic on multi-byte UTF-8
+                let preview: String = raw.chars().take(200).collect();
+                return Err(GcopError::SplitParseFailed(format!(
+                    "JSON parse error: {}. Response preview: {}",
+                    e, preview
+                )));
+            }
+        }
+    };
 
     // Apply deterministic sanitisation to every group message so the split
     // path matches the single-commit path (which already runs sanitise via
@@ -399,6 +469,256 @@ pub fn parse_split_response(raw: &str, expected_files: &[String]) -> Result<Vec<
     }
 
     Ok(response.groups)
+}
+
+/// Strip a leading UTF-8 BOM and common zero-width / format code points so
+/// they cannot mask a leading `{`/`[` (or defeat a strict JSON parse).
+fn strip_invisible_prefix(s: &str) -> &str {
+    s.trim_start_matches([
+        '\u{feff}', // BOM / zero-width no-break space
+        '\u{200b}', // zero-width space
+        '\u{200c}', // zero-width non-joiner
+        '\u{200d}', // zero-width joiner
+        '\u{2060}', // word joiner
+    ])
+}
+
+/// Does every expected (staged) file appear in some recovered group?
+///
+/// A recovery that covers only a subset would silently leave the omitted
+/// files uncommitted, so the caller only accepts a fully-covering recovery.
+fn covers_all_expected(resp: &SplitResponse, expected_files: &[String]) -> bool {
+    let covered: std::collections::HashSet<&str> = resp
+        .groups
+        .iter()
+        .flat_map(|g| g.files.iter())
+        .map(String::as_str)
+        .collect();
+    expected_files.iter().all(|f| covered.contains(f.as_str()))
+}
+
+/// Does `s` look like an attempted (possibly malformed/truncated) JSON/
+/// structured response rather than a plain commit message?
+///
+/// The check is STRUCTURAL, not a substring deny-list — so it is independent
+/// of quoting style (`{groups:`, `{'groups':`, `{"groups":`), key names
+/// (renamed keys like `commit_groups`, dotted/spaced/non-ASCII keys), and any
+/// prose/markdown/heading/fence decoration wrapping the structure. Three
+/// signals, any sufficient:
+///   (a) the candidate (after invisible-prefix + whitespace trim) STARTS WITH
+///       a literal `{` — no real commit subject opens with an object brace, so
+///       any brace-wrapped object or prose (`{ summary }`, `{commit.groups:1}`,
+///       `{"two words": 1}`, `{группы: …}`) is debris regardless of its inner
+///       shape; OR
+///   (b) a structure opener anywhere: a `{` that begins an object (next
+///       meaningful token is a `key:` or a nested `{`/`[`) or a `[` that
+///       begins an array of objects/strings; OR
+///   (c) an unclosed `{`/`[` opener — a truncated structure (streaming
+///       cut-off).
+///
+/// Plain commit subjects with balanced inline punctuation (`fix: {id} route`,
+/// `[skip ci] chore: x`, `rename "message" field {Config}`) do not open with a
+/// brace, have no key-colon opener, and stay balanced, so they are NOT
+/// misclassified. Such structured text must never be committed verbatim as a
+/// message; it errors so the caller retries.
+fn looks_like_json_attempt(s: &str) -> bool {
+    strip_invisible_prefix(s).trim_start().starts_with('{')
+        || has_structure_opener(s)
+        || has_unclosed_opener(s)
+}
+
+/// Scan for a `{`/`[` that opens a JSON-style object/array (quoting- and
+/// key-name-agnostic). All delimiters checked are ASCII, so byte indexing is
+/// codepoint-safe.
+fn has_structure_opener(s: &str) -> bool {
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut i = 0;
+    while i < n {
+        match b[i] {
+            b'{' => {
+                let mut j = i + 1;
+                while j < n && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < n {
+                    // Nested opener → structure.
+                    if b[j] == b'{' || b[j] == b'[' {
+                        return true;
+                    }
+                    // Optional quote, then an identifier, optional closing
+                    // quote, whitespace, then ':' → an object key.
+                    let mut k = j;
+                    let quoted = b[k] == b'"' || b[k] == b'\'';
+                    if quoted {
+                        k += 1;
+                    }
+                    let id_start = k;
+                    while k < n && (b[k].is_ascii_alphanumeric() || b[k] == b'_' || b[k] == b'-') {
+                        k += 1;
+                    }
+                    if k > id_start {
+                        if quoted && k < n && (b[k] == b'"' || b[k] == b'\'') {
+                            k += 1;
+                        }
+                        while k < n && b[k].is_ascii_whitespace() {
+                            k += 1;
+                        }
+                        if k < n && b[k] == b':' {
+                            return true;
+                        }
+                    }
+                }
+            }
+            b'[' => {
+                let mut j = i + 1;
+                while j < n && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                // Array of objects/arrays/strings → structure. A bracketed
+                // word tag like "[skip ci]" is NOT (next token is a bareword).
+                if j < n && matches!(b[j], b'{' | b'[' | b'"' | b'\'') {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Are there unclosed `{`/`[` openers? Strong tell of a truncated structure
+/// (a streaming cut-off loses the trailing closers, leaving EXCESS OPENERS).
+///
+/// Only excess openers count — never excess closers — so a plain commit
+/// message that merely mentions a stray closing brace ("fix: drop trailing }"
+/// ) is not misclassified, while every truncated JSON fragment is still
+/// caught. Counts all braces (including any inside strings); the
+/// structure-opener check handles fully-balanced structures.
+fn has_unclosed_opener(s: &str) -> bool {
+    let mut curly: i32 = 0;
+    let mut square: i32 = 0;
+    for c in s.bytes() {
+        match c {
+            b'{' => curly += 1,
+            b'}' => curly = (curly - 1).max(0),
+            b'[' => square += 1,
+            b']' => square = (square - 1).max(0),
+            _ => {}
+        }
+    }
+    curly > 0 || square > 0
+}
+
+/// Recover a `groups` object embedded in a non-JSON wrapper (prose preamble,
+/// markdown decoration, or an unterminated fence). Tries each `{` as an object
+/// start, finds its brace-balanced end (skipping braces inside JSON string
+/// literals), and re-parses that span as the strict split schema; returns the
+/// first that parses. Returns `None` when no balanced object parses — so
+/// truncated JSON (no matching `}`) is NOT recovered and falls through to the
+/// error path rather than being committed. Wrapper prose that contains its own
+/// braces (`use {placeholder} then: {…json…}`) no longer defeats extraction.
+fn recover_embedded_split_response(s: &str) -> Option<SplitResponse> {
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut i = 0;
+    while i < n {
+        if b[i] == b'{'
+            && let Some(end) = matching_brace_end(b, i)
+            && let Ok(resp) = serde_json::from_str::<SplitResponse>(&s[i..=end])
+        {
+            return Some(resp);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Byte index of the `}` that closes the `{` at `open`, tracking nesting and
+/// ignoring braces inside double-quoted JSON strings (with `\` escapes).
+/// `None` if unbalanced. All matched bytes are ASCII → slice boundaries stay
+/// codepoint-safe.
+fn matching_brace_end(b: &[u8], open: usize) -> Option<usize> {
+    let mut depth: usize = 0;
+    let mut in_str = false;
+    let mut escaped = false;
+    let mut i = open;
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_str = false;
+            }
+        } else {
+            match c {
+                b'"' => in_str = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Attempt to recover a single-group commit from a non-JSON LLM response.
+///
+/// Returns `Some(vec![group])` when the text reads as a usable commit
+/// message, where the group covers EVERY expected (staged) file — i.e. the
+/// model is interpreted as having collapsed all changes into one atomic
+/// commit, which is exactly Base (non-split) behaviour. Returns `None` (so
+/// the caller keeps the original parse error) when:
+///   - nothing is staged (`expected_files` empty) — never synthesise a commit;
+///   - the text looks like a JSON attempt (see [`looks_like_json_attempt`]) —
+///     malformed/truncated JSON, or JSON-in-prose, must error not commit;
+///   - the text normalises to empty (e.g. it was only a forbidden trailer or
+///     an AI-attribution banner that the sanitiser strips away).
+///
+/// The candidate is normalised through the SAME pipeline Base mode uses
+/// (`process_commit_response_with_options`: strip thinking tags → strip a
+/// whole-string fence → deterministic sanitise), so a fallback commit message
+/// is byte-for-byte what the single-commit path would have produced.
+fn try_single_group_fallback(
+    json_str: &str,
+    expected_files: &[String],
+    strip_thinking: bool,
+) -> Option<Vec<CommitGroup>> {
+    // Never fabricate a commit when nothing is staged.
+    if expected_files.is_empty() {
+        return None;
+    }
+
+    // Broken/truncated/embedded JSON is not a commit message. (Recovery of a
+    // *valid* embedded object already ran in the caller; reaching here with a
+    // JSON signal means it was malformed — error, do not commit it verbatim.)
+    if looks_like_json_attempt(json_str) {
+        return None;
+    }
+
+    // Normalise to Base-mode parity.
+    let message = crate::llm::provider::base::process_commit_response_with_options(
+        json_str.to_string(),
+        strip_thinking,
+    );
+    if message.trim().is_empty() {
+        return None;
+    }
+
+    Some(vec![CommitGroup {
+        files: expected_files.to_vec(),
+        message,
+    }])
 }
 
 /// Strip markdown code fences from a string.
@@ -996,5 +1316,397 @@ mod tests {
         ]}"#;
         let expected = vec!["a.rs".to_string(), "b.rs".to_string()];
         assert!(parse_split_response(raw, &expected).is_ok());
+    }
+
+    // === Plain-text fallback (LLM ignored the JSON split contract) ===========
+    //
+    // When JSON parsing fails but the response is a usable commit message, the
+    // model is treated as having collapsed all staged changes into one atomic
+    // commit: a single group covering EVERY expected file. Broken/truncated
+    // JSON (leading `{`/`[`) and empty/blank responses keep the parse error.
+
+    #[test]
+    fn parse_fallback_bare_conventional_subject_single_group() {
+        let expected = vec!["a.rs".to_string(), "b.rs".to_string()];
+        let groups = parse_split_response("feat: add retry logic", &expected).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].files, expected);
+        assert_eq!(groups[0].message, "feat: add retry logic");
+    }
+
+    #[test]
+    fn parse_fallback_fenced_plaintext_message() {
+        let expected = vec!["x.rs".to_string()];
+        let groups =
+            parse_split_response("```\nfix(parser): handle empty input\n```", &expected).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].message, "fix(parser): handle empty input");
+        assert_eq!(groups[0].files, expected);
+    }
+
+    #[test]
+    fn parse_fallback_message_with_braces_not_leading() {
+        // Only the LEADING char is gated; an inner `{` is fine.
+        let expected = vec!["r.rs".to_string()];
+        let groups = parse_split_response("fix(api): handle {id} route", &expected).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].message, "fix(api): handle {id} route");
+    }
+
+    #[test]
+    fn parse_fallback_strips_thinking_tags() {
+        // strip_thinking=true via the 2-arg wrapper.
+        let expected = vec!["c.rs".to_string()];
+        let groups = parse_split_response(
+            "<think>weighing options</think>\nchore: bump deps",
+            &expected,
+        )
+        .unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].message, "chore: bump deps");
+    }
+
+    #[test]
+    fn parse_fallback_drops_forbidden_trailer_keeps_subject() {
+        let expected = vec!["f.rs".to_string()];
+        let groups =
+            parse_split_response("feat: x\n\nCo-authored-by: Bot <b@b>", &expected).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].message.starts_with("feat: x"));
+        assert!(!groups[0].message.contains("Co-authored-by"));
+    }
+
+    #[test]
+    fn parse_fallback_message_with_body_preserved() {
+        let expected = vec!["m.rs".to_string()];
+        let groups = parse_split_response(
+            "refactor(core): extract helper\n\nMove parsing into its own fn.",
+            &expected,
+        )
+        .unwrap();
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].message.contains("refactor(core): extract helper"));
+        assert!(groups[0].message.contains("Move parsing into its own fn."));
+    }
+
+    #[test]
+    fn parse_fallback_non_conventional_subject_accepted() {
+        // Base-mode equivalence: a non-Conventional but non-empty, non-brace
+        // subject is committed, not rejected.
+        let expected = vec!["a.rs".to_string()];
+        let groups = parse_split_response("update build script and docs", &expected).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].message, "update build script and docs");
+    }
+
+    #[test]
+    fn parse_truncated_json_object_keeps_split_parse_failed() {
+        let expected = vec!["a.rs".to_string()];
+        let err = parse_split_response("{\"groups\": [", &expected).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("JSON parse error"));
+        assert!(msg.contains("Response preview"));
+    }
+
+    #[test]
+    fn parse_truncated_json_array_keeps_split_parse_failed() {
+        let expected = vec!["a.rs".to_string()];
+        let result = parse_split_response("[{\"files\":", &expected);
+        assert!(matches!(result, Err(GcopError::SplitParseFailed(_))));
+    }
+
+    #[test]
+    fn parse_fenced_truncated_json_keeps_split_parse_failed() {
+        // After strip_code_fences the text still leads with `{` (unbalanced
+        // fenced JSON), so the broken-JSON guard fires.
+        let expected = vec!["a.rs".to_string()];
+        let result = parse_split_response("```json\n{\"groups\": [\n```", &expected);
+        assert!(matches!(result, Err(GcopError::SplitParseFailed(_))));
+    }
+
+    #[test]
+    fn parse_empty_and_whitespace_keep_split_parse_failed() {
+        let expected = vec!["a.rs".to_string()];
+        assert!(matches!(
+            parse_split_response("", &expected),
+            Err(GcopError::SplitParseFailed(_))
+        ));
+        assert!(matches!(
+            parse_split_response("   \n  ", &expected),
+            Err(GcopError::SplitParseFailed(_))
+        ));
+    }
+
+    #[test]
+    fn parse_only_forbidden_trailer_normalizes_empty_keeps_failed() {
+        // The candidate sanitises to empty (no subject survives) → decline.
+        let expected = vec!["a.rs".to_string()];
+        let result = parse_split_response("Co-authored-by: Bot <b@b>", &expected);
+        assert!(matches!(result, Err(GcopError::SplitParseFailed(_))));
+    }
+
+    #[test]
+    fn parse_ai_banner_only_normalizes_empty_keeps_failed() {
+        let expected = vec!["a.rs".to_string()];
+        let result = parse_split_response("🤖 Generated with Claude", &expected);
+        assert!(matches!(result, Err(GcopError::SplitParseFailed(_))));
+    }
+
+    #[test]
+    fn parse_fallback_skipped_when_expected_files_empty() {
+        // Nothing staged → never synthesise a commit, even for a valid message.
+        let result = parse_split_response("feat: x", &[]);
+        assert!(matches!(result, Err(GcopError::SplitParseFailed(_))));
+    }
+
+    #[test]
+    fn parse_fallback_message_matches_base_pipeline() {
+        // The fallback message is byte-for-byte what the single-commit (Base)
+        // path would have produced from the same raw response.
+        let raw = "Feat: Add X.\n\n🤖 Generated with Claude";
+        let expected = vec!["f.rs".to_string()];
+        let base =
+            crate::llm::provider::base::process_commit_response_with_options(raw.to_string(), true);
+        let groups = parse_split_response(raw, &expected).unwrap();
+        assert_eq!(groups[0].message, base);
+        assert_eq!(groups[0].message, "feat: Add X");
+    }
+
+    // === JSON wrapped in prose / markdown / unterminated fence ==============
+    //
+    // A first-char-only guard would let JSON-bearing text be committed
+    // verbatim as a garbage message. Instead: recover a VALID embedded object
+    // into the real grouping, and DECLINE (keep the parse error) for any
+    // malformed/truncated JSON so the caller retries — never commit it.
+
+    #[test]
+    fn parse_recovers_prose_prefixed_valid_json() {
+        let raw = "Here is the result:\n{\"groups\":[{\"files\":[\"a.rs\"],\"message\":\"feat: a\"},{\"files\":[\"b.rs\"],\"message\":\"fix: b\"}]}";
+        let expected = vec!["a.rs".to_string(), "b.rs".to_string()];
+        let groups = parse_split_response(raw, &expected).unwrap();
+        assert_eq!(
+            groups.len(),
+            2,
+            "the real grouping is recovered, not collapsed"
+        );
+        assert_eq!(groups[0].files, vec!["a.rs"]);
+        assert_eq!(groups[0].message, "feat: a");
+        assert_eq!(groups[1].files, vec!["b.rs"]);
+    }
+
+    #[test]
+    fn parse_recovers_unclosed_fence_valid_json() {
+        // No closing fence; strip_code_fences leaves it, but brace extraction
+        // still recovers the object.
+        let raw = "```json\n{\"groups\":[{\"files\":[\"a.rs\"],\"message\":\"feat: a\"}]}";
+        let expected = vec!["a.rs".to_string()];
+        let groups = parse_split_response(raw, &expected).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].message, "feat: a");
+    }
+
+    #[test]
+    fn parse_recovers_json_with_trailing_prose() {
+        let raw =
+            "{\"groups\":[{\"files\":[\"a.rs\"],\"message\":\"feat: a\"}]}\n\nHope this helps!";
+        let expected = vec!["a.rs".to_string()];
+        let groups = parse_split_response(raw, &expected).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].message, "feat: a");
+    }
+
+    #[test]
+    fn parse_bom_prefixed_valid_json_parses() {
+        let raw = "\u{feff}{\"groups\":[{\"files\":[\"a.rs\"],\"message\":\"feat: a\"}]}";
+        let expected = vec!["a.rs".to_string()];
+        let groups = parse_split_response(raw, &expected).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].message, "feat: a");
+    }
+
+    #[test]
+    fn parse_prose_prefixed_truncated_json_declined() {
+        // Truncated JSON behind prose is NOT a commit message.
+        let expected = vec!["a.rs".to_string()];
+        let result = parse_split_response("Here is the result:\n{\"groups\": [", &expected);
+        assert!(matches!(result, Err(GcopError::SplitParseFailed(_))));
+    }
+
+    #[test]
+    fn parse_unclosed_fence_truncated_json_declined() {
+        // The exact streaming-cutoff case: ```json opener + truncated body,
+        // no closing fence. Must error, never commit the blob.
+        let expected = vec!["a.rs".to_string()];
+        let result = parse_split_response("```json\n{\"groups\": [", &expected);
+        assert!(matches!(result, Err(GcopError::SplitParseFailed(_))));
+    }
+
+    #[test]
+    fn parse_markdown_decorated_truncated_json_declined() {
+        let expected = vec!["a.rs".to_string()];
+        for raw in [
+            "- {\"files\": [",
+            "* {\"groups\": [",
+            "> {\"groups\": [",
+            "1. {\"groups\": [",
+        ] {
+            assert!(
+                matches!(
+                    parse_split_response(raw, &expected),
+                    Err(GcopError::SplitParseFailed(_))
+                ),
+                "markdown-decorated truncated JSON must be declined: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_bom_prefixed_truncated_json_declined() {
+        let expected = vec!["a.rs".to_string()];
+        let result = parse_split_response("\u{feff}{\"groups\": [", &expected);
+        assert!(matches!(result, Err(GcopError::SplitParseFailed(_))));
+    }
+
+    #[test]
+    fn parse_wrong_shape_json_object_declined() {
+        // Valid JSON, wrong schema (no "groups") — must not be committed.
+        let expected = vec!["a.rs".to_string()];
+        let result = parse_split_response("{\"foo\":\"bar\"}", &expected);
+        assert!(matches!(result, Err(GcopError::SplitParseFailed(_))));
+    }
+
+    #[test]
+    fn parse_message_mentioning_groups_word_still_accepted() {
+        // A genuine plain subject that merely mentions the word "groups"
+        // (no brace, no quoted schema key) must NOT be misclassified as JSON.
+        let expected = vec!["a.rs".to_string()];
+        let groups = parse_split_response("refactor: rename groups to cohorts", &expected).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].message, "refactor: rename groups to cohorts");
+    }
+
+    // === Structural JSON-attempt gate (quoting/key-name/decoration agnostic) =
+    //
+    // The gate is structural, not a substring deny-list: it must DECLINE
+    // structured/truncated JSON regardless of quoting style, key names, or
+    // prose/markdown/heading/fence decoration — while still ACCEPTING genuine
+    // plain commit subjects that merely contain balanced inline punctuation.
+
+    #[test]
+    fn parse_declines_structured_json_debris_all_decorations() {
+        let expected = vec!["a.rs".to_string()];
+        let debris = [
+            // stacked markers + truncated, no quoted schema key
+            "> > {\"x\": 1",
+            "- - {commits: [",
+            "> - {'groups': [",
+            // prose preamble + unquoted keys (truncated)
+            "Here is the JSON:\n{groups: [{files: [a.rs]",
+            // prose preamble + single-quoted, FULLY BALANCED (caught structurally)
+            "Output:\n{'groups': [{'files': ['a.rs'], 'message': 'feat: a'}]}",
+            // prose line, then marker, then truncated brace
+            "Note:\n- {oops broken json blob here",
+            // fence opener + stacked markers + truncated
+            "```json\n- - {truncated",
+            // heading + renamed quoted keys (truncated)
+            "## Commits\n{\"commit_groups\": [{\"paths\": [\"a.rs\"]",
+            // valid JSON, wrong schema
+            "{\"foo\":\"bar\"}",
+            // bare truncated object behind prose
+            "Sure thing:\n{",
+        ];
+        for raw in debris {
+            assert!(
+                matches!(
+                    parse_split_response(raw, &expected),
+                    Err(GcopError::SplitParseFailed(_))
+                ),
+                "structured/truncated JSON must be declined, not committed: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_declines_brace_wrapped_object_or_prose() {
+        // Balanced objects whose first key is dotted / spaced / quoted-multi-
+        // word / non-ASCII defeat the key-colon scan, and brace-wrapped prose
+        // has no key at all — but NONE of these is a commit subject, and a
+        // real subject never opens with a literal `{`. The leading-`{` signal
+        // declines them all.
+        let expected = vec!["a.rs".to_string()];
+        for raw in [
+            "{commit.groups: 1}",                     // dotted bareword key
+            "{\"my key\": 1}",                        // quoted multi-word key
+            "{группы: [a.rs]}",                       // non-ASCII bareword key
+            "{\"группы\": [1]}",                      // non-ASCII quoted key
+            "{ summary }",                            // brace-wrapped single word
+            "{Note to self: split into auth and ui}", // brace-wrapped prose
+            "{commit message here}",                  // brace-wrapped prose
+            "  \u{feff}{groups: [",                   // BOM + whitespace then object
+        ] {
+            assert!(
+                matches!(
+                    parse_split_response(raw, &expected),
+                    Err(GcopError::SplitParseFailed(_))
+                ),
+                "brace-opening debris must be declined, not committed: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_accepts_plain_subjects_with_inline_punctuation() {
+        // None of these are structured JSON; all must degrade to a single
+        // commit, not hard-error.
+        let expected = vec!["a.rs".to_string(), "b.rs".to_string()];
+        for raw in [
+            "[skip ci] chore: bump deps",
+            "[WIP] feat: add parser",
+            "fix(api): handle {id} route",
+            "refactor(core): rename the \"message\" field\n\nAlso touches {Config} struct",
+            "build(deps): bump foo from {1.0} to {2.0}",
+            // stray CLOSING brace/bracket is not a truncated opener
+            "fix(lexer): drop the trailing } in templates",
+            "fix(parser): tolerate a stray ] in input",
+        ] {
+            let groups = parse_split_response(raw, &expected)
+                .unwrap_or_else(|e| panic!("plain subject must be accepted: {raw:?} got {e}"));
+            assert_eq!(groups.len(), 1, "single collapsed group for {raw:?}");
+            assert_eq!(groups[0].files, expected);
+        }
+    }
+
+    #[test]
+    fn parse_recovery_requires_full_file_coverage() {
+        // Valid embedded JSON that covers only a SUBSET of staged files must
+        // NOT be silently accepted (it would drop the uncovered file); it
+        // declines and, being structural, errors so the caller retries.
+        let expected = vec!["a.rs".to_string(), "b.rs".to_string()];
+        let raw = "Here:\n{\"groups\":[{\"files\":[\"a.rs\"],\"message\":\"feat: a\"}]}";
+        assert!(matches!(
+            parse_split_response(raw, &expected),
+            Err(GcopError::SplitParseFailed(_))
+        ));
+    }
+
+    #[test]
+    fn parse_recovery_ignores_braces_in_wrapper_prose() {
+        // A `{placeholder}` in the wrapper must not defeat brace-balanced
+        // extraction of the real groups object that follows.
+        let expected = vec!["a.rs".to_string()];
+        let raw = "Use {placeholder} then:\n{\"groups\":[{\"files\":[\"a.rs\"],\"message\":\"feat: a\"}]}";
+        let groups = parse_split_response(raw, &expected).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].message, "feat: a");
+        assert_eq!(groups[0].files, vec!["a.rs"]);
+    }
+
+    #[test]
+    fn parse_recovery_covering_all_files_accepted() {
+        let expected = vec!["a.rs".to_string(), "b.rs".to_string()];
+        let raw = "Done:\n{\"groups\":[{\"files\":[\"a.rs\"],\"message\":\"feat: a\"},{\"files\":[\"b.rs\"],\"message\":\"fix: b\"}]}";
+        let groups = parse_split_response(raw, &expected).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[1].message, "fix: b");
     }
 }
